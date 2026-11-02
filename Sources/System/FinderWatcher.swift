@@ -76,11 +76,16 @@ enum WindowServer {
         let opts: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
         guard let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]]
         else { return nil }
+        let min = NotePreferences.shared.minSize
         for info in list {  // front-to-back
             guard info[kCGWindowLayer as String] as? Int == 0,
                 info[kCGWindowOwnerPID as String] as? Int == Int(pid),
                 let b = info[kCGWindowBounds as String] as? NSDictionary,
-                let rect = CGRect(dictionaryRepresentation: b)
+                let rect = CGRect(dictionaryRepresentation: b),
+                // A full-screen app's title bar is its own thin layer-0 window, stacked above
+                // the content window — tracking it pinned the note to a 32pt strip at the top.
+                // Nothing smaller than a note can host one, so skip it like Finder's rename field.
+                rect.width >= min.width, rect.height >= min.height
             else { continue }
             return rect
         }
