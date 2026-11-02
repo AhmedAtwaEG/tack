@@ -14,6 +14,9 @@ final class NoteCard: NSObject {
     let editor: NoteEditor  // the text, its markdown rules, and the only writer to it
     let styler: NoteStyler  // the note's colour and typeface, and the tint that shows one
     let pill: NotePill  // the control cluster in the card's top-right corner
+    /// The first line, shown in place of the text while the note is folded to its title bar.
+    private let title = PassthroughLabel(labelWithString: "")
+    private(set) var isCollapsed = false
 
     /// The text, colour or face changed and is worth persisting.
     var onEdit: () -> Void = {}
@@ -75,8 +78,15 @@ final class NoteCard: NSObject {
         editor = NoteEditor(frame: NSRect(x: 4, y: 4, width: w - 8, height: h - Self.strip - 4))
         view.addSubview(editor.view)
 
+        title.font = .systemFont(ofSize: 12, weight: .medium)
+        title.textColor = NSColor.black.withAlphaComponent(0.75)
+        title.lineBreakMode = .byTruncatingTail
+        title.isHidden = true
+        view.addSubview(title)
+
         pill = NotePill(cardWidth: w, cardHeight: h, styler: styler)
         view.addSubview(pill.view)
+        view.topBand = Self.strip
 
         super.init()
         view.onPress = { [weak self] in self?.pill.close() }  // the picker's way out
@@ -97,6 +107,33 @@ final class NoteCard: NSObject {
         editor.family = styler.family
         pill.reset()  // a reused card must never arrive already open
         editor.load(note.text)
+        if isCollapsed { title.stringValue = Note.title(of: editor.markdown) }
+    }
+
+    /// Fold to the title bar or unfold back to the text. The owner resizes the card around this:
+    /// fold *before* shrinking it, unfold *after* growing it, so the editor is never laid out
+    /// into a bar too short to hold it.
+    func setCollapsed(_ collapsed: Bool) {
+        isCollapsed = collapsed
+        editor.view.isHidden = collapsed
+        title.isHidden = !collapsed
+        view.topBand = collapsed ? .greatestFiniteMagnitude : Self.strip  // the whole bar is the top
+        let b = view.bounds
+        if collapsed {
+            title.stringValue = Note.title(of: editor.markdown)
+            let reserve = NotePill.pillClosedSize.width + NotePill.pillInset * 2  // the pill's corner
+            // Laid out while the card is still full height (it shrinks to the bar afterwards), so
+            // place it in the *bar's* band at the top and pin it there with a flexible bottom
+            // margin — a fixed bottom margin left it stranded above the bar, out of sight.
+            let bar = NotePreferences.shared.collapsedHeight
+            title.frame = NSRect(
+                x: 10, y: b.height - bar + (bar - 16) / 2, width: max(0, b.width - 10 - reserve),
+                height: 16)
+            title.autoresizingMask = [.width, .minYMargin]
+        } else {
+            // Autoresizing through a 30pt bar can leave the editor's frame mangled; set it outright.
+            editor.view.frame = NSRect(x: 4, y: 4, width: b.width - 8, height: b.height - Self.strip - 4)
+        }
     }
 
     /// The card's three fields written over `base`. Where the note sits and how big it is belongs
@@ -158,4 +195,10 @@ final class NoteCard: NSObject {
         alert.addButton(withTitle: "Cancel")
         return alert.runModal() == .alertFirstButtonReturn
     }
+}
+
+/// A label the mouse goes straight through, so the collapsed bar's title can be dragged and
+/// double-clicked like the rest of the bar instead of swallowing the clicks.
+private final class PassthroughLabel: NSTextField {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }

@@ -7,6 +7,9 @@ final class DragGlassView: NSVisualEffectView {
     var onDrag: ((NSPoint) -> Void)?  // proposed window origin, Cocoa coords
     var onPress: (() -> Void)?  // a click anywhere on the card: dismisses an open picker
     var contextMenu: (() -> NSMenu?)?  // right-click on the card: palette editing and pin level
+    var onTopDoubleClick: (() -> Void)?  // double-click in the top band: fold/unfold, as in Stickies
+    /// How far down from the top edge a double-click counts as "on the title bar".
+    var topBand: CGFloat = 0
     // nil unless a drag actually began on the glass. A mouseDragged with no grab is one that
     // bubbled up the responder chain — e.g. a checkbox click in the text view, whose mouseDown we
     // handled without consuming the gesture. Acting on it would drag the note with a stale offset,
@@ -15,6 +18,13 @@ final class DragGlassView: NSVisualEffectView {
 
     override func mouseDown(with event: NSEvent) {
         onPress?()
+        if event.clickCount == 2, let onTopDoubleClick,
+            convert(event.locationInWindow, from: nil).y >= bounds.height - topBand
+        {
+            grab = nil  // the second click of a double-click is not the start of a drag
+            onTopDoubleClick()
+            return
+        }
         guard let origin = window?.frame.origin else { return }
         let mouse = NSEvent.mouseLocation
         grab = NSPoint(x: mouse.x - origin.x, y: mouse.y - origin.y)

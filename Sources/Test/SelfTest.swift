@@ -37,6 +37,8 @@ enum SelfTest {
         blockTreeRejectsInvalidOperations()
         backspaceAtTheEnd()
         noteSizeIsOptional()
+        collapsedNote()
+        collapsedTitle()
         urlNormalization()
         notePreferencesPalette()
         fontFaces()
@@ -892,6 +894,56 @@ extension SelfTest {
         let sized = Note(text: "hi", dx: 1, dy: 2, color: nil, w: 300, h: 240)
         let data = try! JSONEncoder().encode(sized)
         assert(try! JSONDecoder().decode(Note.self, from: data) == sized, "size should round-trip")
+    }
+
+    static func collapsedNote() {
+        // Same no-migration guarantee: an older note decodes as expanded, and an expanded note
+        // writes no `collapsed` key at all, so files stay byte-for-byte what they were.
+        let old = #"{"text":"hi","dx":12,"dy":34,"w":300,"h":240}"#.data(using: .utf8)!
+        let n = try! JSONDecoder().decode(Note.self, from: old)
+        assert(n.collapsed == nil, "a pre-collapse note should decode as expanded: \(n)")
+        let plain = String(data: try! JSONEncoder().encode(n), encoding: .utf8)!
+        assert(!plain.contains("collapsed"), "an expanded note should not write the key: \(plain)")
+
+        var folded = n
+        folded.collapsed = true
+        let back = try! JSONDecoder().decode(Note.self, from: try! JSONEncoder().encode(folded))
+        assert(back == folded, "collapsed should round-trip")
+        assert(back.w == 300 && back.h == 240, "folding must keep the expanded size: \(back)")
+
+        // Folded: the bar keeps the note's width but takes the bar's height; a window shorter
+        // than the bar still caps it. Unfolded: exactly `fit`.
+        let window = CGSize(width: 800, height: 600)
+        let desired = CGSize(width: 300, height: 240)
+        assert(
+            Coord.shown(desired: desired, window: window, collapsedHeight: 30)
+                == CGSize(width: 300, height: 30), "a folded note should be a 30pt bar")
+        assert(
+            Coord.shown(desired: desired, window: CGSize(width: 200, height: 20), collapsedHeight: 30)
+                == CGSize(width: 200, height: 20), "a tiny window should cap even the bar")
+        assert(
+            Coord.shown(desired: desired, window: window, collapsedHeight: nil)
+                == Coord.fit(desired: desired, window: window), "unfolded is just fit")
+    }
+
+    static func collapsedTitle() {
+        let cases: [(String, String)] = [
+            ("ESlint\n\n# Material Editor fragment", "ESlint"),
+            ("\n\n  # Heading  \nbody", "Heading"),
+            ("- [ ] buy milk", "buy milk"),
+            ("- [x] done", "done"),
+            ("* item", "item"),
+            ("12. twelfth", "twelfth"),
+            ("> quoted", "quoted"),
+            ("**bold** and `code`", "bold and code"),
+            ("#hashtag is not a heading", "#hashtag is not a heading"),
+            ("", ""),
+            ("\n   \n", ""),
+        ]
+        for (markdown, expected) in cases {
+            let got = Note.title(of: markdown)
+            assert(got == expected, "title of \(markdown.debugDescription): \(got.debugDescription)")
+        }
     }
 
 

@@ -26,6 +26,14 @@ enum Coord {
         CGSize(width: min(desired.width, window.width), height: min(desired.height, window.height))
     }
 
+    /// `fit`, then folded to `collapsedHeight` when the note is collapsed (nil: expanded). The
+    /// width still follows `desired`, so a collapsed bar is as wide as the note it folds.
+    static func shown(desired: CGSize, window: CGSize, collapsedHeight: CGFloat?) -> CGSize {
+        var size = fit(desired: desired, window: window)
+        if let collapsedHeight { size.height = min(collapsedHeight, window.height) }
+        return size
+    }
+
     /// Holds the note inside the tracked window: the offset is clamped so the note's whole
     /// rect stays within the window. A window smaller than the note pins it to the top-left.
     static func clamp(dx: Double, dy: Double, note: CGSize, window: CGSize) -> (

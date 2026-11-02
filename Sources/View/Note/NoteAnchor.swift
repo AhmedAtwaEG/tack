@@ -21,7 +21,18 @@ final class NoteAnchor {
     /// The size the note wants to be. The shown size is this capped to the tracked window, so a
     /// note never spills outside the window it's pinned to — and restores when the window grows.
     private(set) var desired = NotePreferences.shared.defaultSize
+    /// Folded to its title bar. `desired` keeps the expanded size meanwhile — only the shown
+    /// height changes — so unfolding lands exactly where the note was.
+    private(set) var collapsed = false
     private var isProgrammaticMove = false
+
+    /// What the note occupies on screen right now: `desired` capped to the window, folded when
+    /// collapsed. Every clamp works on this, so a collapsed bar can travel the whole window.
+    private var shownSize: CGSize {
+        Coord.shown(
+            desired: desired, window: tracked.size,
+            collapsedHeight: collapsed ? NotePreferences.shared.collapsedHeight : nil)
+    }
 
     init(window: NSWindow) { self.window = window }
 
@@ -33,7 +44,17 @@ final class NoteAnchor {
         desired = NSSize(
             width: note.w ?? NotePreferences.shared.defaultSize.width,
             height: note.h ?? NotePreferences.shared.defaultSize.height)
+        collapsed = note.collapsed ?? false
         applyPosition()  // sizes the note (capped to the tracked window) and positions it
+    }
+
+    /// Fold or unfold — a user gesture, so it's persisted like a drag. The top edge stays put;
+    /// an unfolded note that would now overflow the window is display-clamped back inside.
+    func setCollapsed(_ value: Bool) {
+        guard value != collapsed else { return }
+        collapsed = value
+        applyPosition()
+        onChange()
     }
 
     /// The note's on-screen rect in top-left screen coords, for occlusion tests.
@@ -83,11 +104,15 @@ final class NoteAnchor {
     }
 
     private func applyPosition() {
-        let fit = Coord.fit(desired: desired, window: tracked.size)
+        let fit = shownSize
         // Let the note shrink below its usual floor when the window is smaller than that floor,
         // and stop the user resizing it past the window — both keep the note inside the surface.
         window.minSize = Coord.fit(desired: NotePreferences.shared.minSize, window: tracked.size)
         window.maxSize = tracked.size
+        if collapsed {  // a bar resizes sideways only: its height is pinned
+            window.minSize.height = fit.height
+            window.maxSize.height = fit.height
+        }
         // Display-only clamp: stored dx/dy keep the note's true spot, mirroring `desired` for
         // size. Writing the clamp back means one frame of tracking a bogus window rewrites
         // where the note lives for good. The user paths (drag, resize) clamp-and-store
@@ -106,7 +131,7 @@ final class NoteAnchor {
     /// Clamp the stored offset itself — only for user actions, where the border really is
     /// the note's new position. Programmatic tracking must never do this (see applyPosition).
     private func storeClamped() {
-        let fit = Coord.fit(desired: desired, window: tracked.size)
+        let fit = shownSize
         (dx, dy) = Coord.clamp(dx: dx, dy: dy, note: fit, window: tracked.size)
     }
 
@@ -126,7 +151,8 @@ final class NoteAnchor {
             // opposite side. What survives the cut is the size the note keeps (`desired`).
             let c = Coord.contain(dx: dx, dy: dy, note: f.size, window: tracked.size)
             (dx, dy) = (c.dx, c.dy)
-            desired = c.size
+            // A collapsed bar only resizes sideways; its expanded height is not the bar's to change.
+            desired = collapsed ? CGSize(width: c.size.width, height: desired.height) : c.size
         } else {
             storeClamped()
         }

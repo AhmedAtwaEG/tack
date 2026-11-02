@@ -29,6 +29,8 @@ final class NotePreferences {
     let defaultSize = NSSize(width: 220, height: 170)
     /// Any smaller and the pill of dots and the drag strip leave no room for text.
     let minSize = NSSize(width: 160, height: 120)
+    /// A collapsed note: just tall enough for its title and the closed pill (6pt inset + 22pt).
+    let collapsedHeight: CGFloat = 30
 
     // MARK: - Palette
 

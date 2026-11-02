@@ -65,6 +65,7 @@ final class NoteWindow: NSObject, NSWindowDelegate {
         card.onDelete = { [weak self] in self?.deleteConfirmed() }
         card.view.onDrag = { [weak self] origin in self?.anchor.dragTo(origin: origin) }
         card.view.contextMenu = { [weak self] in self?.buildMenu() }
+        card.view.onTopDoubleClick = { [weak self] in self?.toggleCollapsed() }
         window.delegate = self
         window.invalidateShadow()
     }
@@ -146,7 +147,11 @@ final class NoteWindow: NSObject, NSWindowDelegate {
         active = true
         occluded = false  // re-evaluated on the next tracking frame
         card.load(note)
+        // Fold the card before the anchor shrinks the window to a bar, unfold it after the
+        // anchor grows it back — see NoteCard.setCollapsed.
+        if note.collapsed == true { card.setCollapsed(true) }
         anchor.begin(note: note, bounds: bounds)
+        if note.collapsed != true { card.setCollapsed(false) }
         // Switching between two notes reuses this one window, so pop unconditionally rather than
         // going through applyVisibility — otherwise the incoming note would just teleport in.
         shown = true
@@ -179,7 +184,22 @@ final class NoteWindow: NSObject, NSWindowDelegate {
     /// The process may terminate before the debounce delay expires.
     @discardableResult func flushPendingSave() -> Bool { saver.flush() }
 
+    /// Fold the note to its title bar or unfold it, as double-clicking a Stickies title bar does.
+    /// Same ordering rule as `show`: the card folds before the window shrinks, unfolds after it grows.
+    private func toggleCollapsed() {
+        if anchor.collapsed {
+            anchor.setCollapsed(false)
+            card.setCollapsed(false)
+        } else {
+            window.makeFirstResponder(nil)  // no caret blinking inside a hidden editor
+            card.setCollapsed(true)
+            anchor.setCollapsed(true)
+        }
+    }
+
+    /// "Add note here" means "let me type" — a folded note unfolds first.
     func focusForEditing() {
+        if anchor.collapsed { toggleCollapsed() }
         window.makeKeyAndOrderFront(nil)
         card.focus(in: window)
     }
@@ -250,7 +270,8 @@ final class NoteWindow: NSObject, NSWindowDelegate {
         let note = card.note(keeping: Note(
             text: "", dx: anchor.dx, dy: anchor.dy,
             // intended size, not the capped one
-            w: Double(anchor.desired.width), h: Double(anchor.desired.height)))
+            w: Double(anchor.desired.width), h: Double(anchor.desired.height),
+            collapsed: anchor.collapsed ? true : nil))  // nil keeps expanded notes' files unchanged
         // snapshot: an in-flight save must use the handler — and level — of the note it was
         // scheduled for, not whichever note is showing 0.5s later
         onLiveEdit?(note)  // the screen keeps up with the typing; the disk waits for a pause
