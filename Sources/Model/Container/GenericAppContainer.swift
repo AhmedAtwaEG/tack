@@ -9,17 +9,25 @@ class GenericAppContainer: Container {
     let ident: String
 
     init?(app: NSRunningApplication) {
-        guard let win = AXWindows.focusedWindow(pid: app.processIdentifier),
-            let id = AXWindows.string(win, kAXDocumentAttribute)
-                ?? AXWindows.string(win, kAXTitleAttribute),
-            !id.isEmpty
+        // An empty AXDocument (Electron reports one) must fall through to the title, not end
+        // the lookup there.
+        let win = AXWindows.focusedWindow(pid: app.processIdentifier)
+        let id = win.flatMap { w in
+            [kAXDocumentAttribute, kAXTitleAttribute].lazy
+                .compactMap { AXWindows.string(w, $0) }.first { !$0.isEmpty }
+        }
+        // No window identity at all: a plain app can still take an app-level note, as long
+        // as it has a window on screen to pin it to. Subclasses key on the window, so they can't.
+        guard id != nil
+            || (Self.self == GenericAppContainer.self
+                && WindowServer.frontWindowBounds(pid: app.processIdentifier) != nil)
         else { return nil }
         self.bundleID = app.bundleIdentifier ?? app.localizedName ?? "app"
         self.pid = app.processIdentifier
-        self.ident = id
+        self.ident = id ?? ""
     }
 
-    override var path: [String] { [bundleID, ident] }
+    override var path: [String] { ident.isEmpty ? [bundleID] : [bundleID, ident] }
 
     override func note(at level: Int) throws -> Note? {
         let currentKey = key(at: level)
