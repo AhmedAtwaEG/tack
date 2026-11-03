@@ -18,10 +18,19 @@ class GenericAppContainer: Container {
         }
         // No window identity at all: a plain app can still take an app-level note, as long
         // as it has a window on screen to pin it to. Subclasses key on the window, so they can't.
+        // Only with the Accessibility grant, though: without it *every* app has no identity, and
+        // falling back would quietly pin every new note to its whole app instead of saying so.
+        DebugLog.note(
+            "identify \(app.bundleIdentifier ?? "?") as \(Self.self): focusedWindow=\(win != nil) "
+                + "document=\(win.flatMap { AXWindows.string($0, kAXDocumentAttribute) }.debugDescription) "
+                + "title=\(win.flatMap { AXWindows.string($0, kAXTitleAttribute) }.debugDescription)")
         guard id != nil
-            || (Self.self == GenericAppContainer.self
+            || (Self.self == GenericAppContainer.self && AXIsProcessTrusted()
                 && WindowServer.frontWindowBounds(pid: app.processIdentifier) != nil)
-        else { return nil }
+        else {
+            DebugLog.note("identify: no window identity, giving up")
+            return nil
+        }
         self.bundleID = app.bundleIdentifier ?? app.localizedName ?? "app"
         self.pid = app.processIdentifier
         self.ident = id ?? ""

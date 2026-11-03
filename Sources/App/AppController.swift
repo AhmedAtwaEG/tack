@@ -84,16 +84,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Don't latch a surface we can't place the note on — leaving `current` nil means the
         // next poll retries, rather than stranding the note hidden until the user focuses away.
         guard let f = container.frame() else {
+            DebugLog.note("poll: \(container.path.first ?? "?") has no on-screen window to pin to")
             hideAll()
             current = nil
             return
         }
-        // ponytail: opt-in path logging for diagnosing identity. Enable with
-        //   defaults write com.tack.app debugPaths -bool YES
-        // then watch with: log stream --predicate 'process == "Tack"'
-        if UserDefaults.standard.bool(forKey: "debugPaths") {
-            NSLog("[tack] path=%@", container.path.joined(separator: " / "))
-        }
+        DebugLog.note("poll: path=\(container.path.joined(separator: " / ")) frame=\(f.bounds)")
         // Edits still in a debounce must reach disk before it's read, or coming back to a
         // surface within half a second would show what its notes said before the edit.
         flushAll()

@@ -16,6 +16,7 @@ final class BrowserContainer: GenericAppContainer {
 
     override init?(app: NSRunningApplication) {
         url = AXWindows.focusedURL(pid: app.processIdentifier).map(BrowserContainer.normalize)
+        DebugLog.note("browser url=\(url.debugDescription)")
         super.init(app: app)
     }
 

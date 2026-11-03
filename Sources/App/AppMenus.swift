@@ -33,11 +33,43 @@ extension AppDelegate {
     /// Adds another note to the focused surface — a window can hold as many as you like — and
     /// puts the caret in it.
     @objc func addNote() {
-        guard let container = resolve(), let f = container.frame(),
-            let window = addNewNote(on: container, frame: f)
-        else { return }
+        let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "-"
+        guard let container = resolve() else {
+            DebugLog.note("addNote: front=\(front): no surface identified")
+            // Finder works without the grant; everything else needs it. Say so rather than do
+            // nothing — a rebuilt, re-signed Tack silently loses it while Settings still shows it on.
+            if front != FinderContainer.bundleID, !AXIsProcessTrusted() { explainMissingAccessibility() }
+            return
+        }
+        guard let f = container.frame() else {
+            return DebugLog.note("addNote: front=\(front): \(container.path) has no on-screen window")
+        }
+        guard let window = addNewNote(on: container, frame: f) else {
+            return DebugLog.note("addNote: front=\(front): the note could not be shown")
+        }
+        DebugLog.note("addNote: added to \(container.path) in \(f.bounds)")
         NSApp.activate(ignoringOtherApps: true)
         window.focusForEditing()
+    }
+
+    /// Why "Add note here" can't work, and the one place to fix it. Settings can show Tack as
+    /// allowed while the grant belongs to an earlier build, so the advice is to remove and re-add.
+    private func explainMissingAccessibility() {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Tack needs Accessibility access"
+        alert.informativeText = """
+            To pin notes to app windows, allow Tack in System Settings ▸ Privacy & Security ▸ \
+            Accessibility. If Tack is already listed and switched on, remove it with “−”, add it \
+            again with “+”, then quit and reopen Tack. Finder folders work without it.
+            """
+        alert.addButton(withTitle: "Open Settings")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn,
+            let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+        else { return }
+        NSWorkspace.shared.open(url)
     }
 
     /// Opens the Tack window on every note. The floating notes are flushed first: each can be up

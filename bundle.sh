@@ -31,7 +31,12 @@ for s in 16 32 128 256 512; do
 done
 iconutil -c icns "$ICONSET/AppIcon.iconset" -o "$APP/Contents/Resources/AppIcon.icns"
 
-SIGN_ID="${SIGN_ID:-$(security find-identity -v -p codesigning | awk 'NR==1 {print $2}')}"
+SIGN_ID="${SIGN_ID:-$(security find-identity -v -p codesigning | awk 'NR==1 && $2 ~ /^[0-9A-F]{40}$/ {print $2}')}"
+# A self-signed local identity isn't "valid" (trusted) to find-identity -v, yet it signs fine
+# and keeps TCC's grant across rebuilds just the same — use it when there's nothing else.
+if [ -z "$SIGN_ID" ] && security find-certificate -c "Tack Local Signing" >/dev/null 2>&1; then
+  SIGN_ID="Tack Local Signing"
+fi
 [ -n "$SIGN_ID" ] || { echo "No codesigning identity in keychain; see README." >&2; exit 1; }
 codesign --force --sign "$SIGN_ID" "$APP"
 
