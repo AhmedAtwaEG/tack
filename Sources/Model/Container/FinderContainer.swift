@@ -10,7 +10,7 @@ final class FinderContainer: Container {
     override var minLevel: Int { 1 }
 
     // ponytail: one level exists here, so `level` is always 1 and the folder is the key
-    override func note(at level: Int) throws -> Note? { try NoteStore.load(folder: folder) }
+    override func notes(at level: Int) throws -> [Note] { try NoteStore.load(folder: folder) }
     override func write(_ note: Note, at level: Int) throws {
         try NoteStore.save(folder: folder, note: note)
     }

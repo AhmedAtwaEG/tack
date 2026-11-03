@@ -148,7 +148,9 @@ final class NoteCard: NSObject {
 
     /// An empty note deletes, app-wide — so the colour is all that's worth carrying over.
     func deletion(keeping base: Note) -> Note {
-        Note(text: "", dx: base.dx, dy: base.dy, color: styler.colorHex)
+        var gone = Note(text: "", dx: base.dx, dy: base.dy, color: styler.colorHex)
+        gone.id = base.id  // a deletion is by id: without it, the note it means would survive
+        return gone
     }
 
     func focus(in window: NSWindow?) { window?.makeFirstResponder(editor.textView) }

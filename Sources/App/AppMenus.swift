@@ -30,30 +30,20 @@ extension AppDelegate {
         return i
     }
 
-    /// Shows the current container's note, or creates a centred empty note when none is saved.
+    /// Adds another note to the focused surface — a window can hold as many as you like — and
+    /// puts the caret in it.
     @objc func addNote() {
-        guard let container = resolve(), let f = container.frame() else { return }
-        let hit: (note: Note, level: Int)?
-        do {
-            hit = try container.load()
-        } catch {
-            reportPersistenceError(error)
-            return
-        }
-        let start = Coord.center(note: NotePreferences.shared.defaultSize, window: f.bounds.size)
-        guard showNote(
-            hit?.note ?? Note(text: "", dx: start.dx, dy: start.dy), frame: f, container: container,
-            level: hit?.level ?? container.finestLevel)  // finest available, promote later
+        guard let container = resolve(), let f = container.frame(),
+            let window = addNewNote(on: container, frame: f)
         else { return }
-        current = container
         NSApp.activate(ignoringOtherApps: true)
-        note.focusForEditing()
+        window.focusForEditing()
     }
 
-    /// Opens the Tack window on every note. The floating note is flushed first: it can be up to
-    /// a debounce behind the disk the grid is about to read.
+    /// Opens the Tack window on every note. The floating notes are flushed first: each can be up
+    /// to a debounce behind the disk the grid is about to read.
     @objc func openTack() {
-        note.flushPendingSave()
+        flushAll()
         openGrid()
     }
 

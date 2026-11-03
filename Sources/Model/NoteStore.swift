@@ -97,7 +97,7 @@ private enum JSONFile {
 }
 
 /// Reads/writes a hidden `.tack.json` inside the folder itself, so notes travel
-/// with the folder when it's moved or copied.
+/// with the folder when it's moved or copied. One folder can hold several notes (see `NoteList`).
 enum NoteStore {
     static let fileName = ".tack.json"
 
@@ -105,25 +105,37 @@ enum NoteStore {
         URL(fileURLWithPath: folder).appendingPathComponent(fileName)
     }
 
-    static func load(folder: String) throws -> Note? {
-        try JSONFile.load(Note.self, from: fileURL(forFolder: folder))
+    /// The key a folder's notes are filed under everywhere else, and what older notes' ids derive from.
+    static func key(forFolder folder: String) -> String {
+        Container.key(path: [FinderContainer.bundleID, folder], level: 1)
     }
 
+    /// Every note in the folder, in the order they were added; empty when there's no file.
+    static func load(folder: String) throws -> [Note] {
+        try JSONFile.load(NoteList.self, from: fileURL(forFolder: folder))?
+            .identified(key: key(forFolder: folder)) ?? []
+    }
+
+    /// Writes one note into the folder by id — replacing it, adding it, or (empty text) removing
+    /// it — and leaves the folder's other notes exactly as they were. The last note out takes the
+    /// file with it.
     static func save(folder: String, note: Note) throws {
         let url = fileURL(forFolder: folder)
-        _ = try JSONFile.load(Note.self, from: url)  // never overwrite or delete malformed data
-        if note.isDeletion {
+        let current = try load(folder: folder)  // throws on malformed data: never overwrite it
+        let notes = NoteList.applying(note, to: current)
+        if notes.isEmpty {
             try JSONFile.delete(url)
             NotePreferences.shared.forgetFolder(folder)
         } else {
-            try JSONFile.save(note, to: url)
+            try JSONFile.save(NoteList(notes), to: url)
             NotePreferences.shared.rememberFolder(folder)  // the only index these notes get
         }
     }
 }
 
 /// Notes bound to app windows (not Finder folders) live in one central JSON, keyed by a
-/// window identity string, since a generic app window has no folder to write into.
+/// window identity string, since a generic app window has no folder to write into. Each key
+/// holds that place's notes in the same one-or-many shape as a folder file.
 enum AppNotes {
     private static func fileURL() throws -> URL {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -137,43 +149,55 @@ enum AppNotes {
     }
 
     /// Every app note at once, keyed by container key — what the Tack window lists.
-    static func all() throws -> [String: Note] { try all(from: fileURL()) }
+    static func all() throws -> [String: [Note]] { try all(from: fileURL()) }
 
-    static func all(from url: URL) throws -> [String: Note] {
-        try JSONFile.load([String: Note].self, from: url) ?? [:]
+    static func all(from url: URL) throws -> [String: [Note]] {
+        let raw = try JSONFile.load([String: NoteList].self, from: url) ?? [:]
+        return Dictionary(uniqueKeysWithValues: raw.map { ($0.key, $0.value.identified(key: $0.key)) })
     }
 
-    static func load(key: String) throws -> Note? { try load(key: key, from: fileURL()) }
+    static func load(key: String) throws -> [Note] { try load(key: key, from: fileURL()) }
 
-    static func load(key: String, from url: URL) throws -> Note? { try all(from: url)[key] }
+    static func load(key: String, from url: URL) throws -> [Note] { try all(from: url)[key] ?? [] }
 
     /// Load a stable key, migrating the old title-dependent key on first access.
-    static func load(key: String, migrating legacyKey: String) throws -> Note? {
+    static func load(key: String, migrating legacyKey: String) throws -> [Note] {
         try load(key: key, migrating: legacyKey, from: fileURL())
     }
 
-    static func load(key: String, migrating legacyKey: String, from url: URL) throws -> Note? {
-        if let note = try load(key: key, from: url) { return note }
-        guard legacyKey != key, let note = try load(key: legacyKey, from: url) else { return nil }
-        try save(key: key, note: note, to: url)
-        try save(key: legacyKey, note: Note(text: "", dx: note.dx, dy: note.dy), to: url)
-        return note
+    /// The whole place moves in a single write — its notes land at the stable key and the
+    /// legacy key goes, together, so an interruption can't leave half of them behind. Ids are
+    /// fixed as they move, so an older note keeps the id it was shown under.
+    static func load(key: String, migrating legacyKey: String, from url: URL) throws -> [Note] {
+        var dict = try all(from: url)
+        if let notes = dict[key], !notes.isEmpty { return notes }
+        guard legacyKey != key, let notes = dict[legacyKey], !notes.isEmpty else { return [] }
+        dict[key] = notes
+        dict[legacyKey] = nil
+        try write(dict, to: url)
+        return notes
     }
 
     static func save(key: String, note: Note) throws {
         try save(key: key, note: note, to: fileURL())
     }
 
+    /// One note into one key by id; every other note — at this key and every other — untouched.
     static func save(key: String, note: Note, to url: URL) throws {
         var dict = try all(from: url)
-        dict[key] = note.isDeletion ? nil : note
-        try JSONFile.save(dict, to: url, backup: true)
+        let notes = NoteList.applying(note, to: dict[key] ?? [])
+        dict[key] = notes.isEmpty ? nil : notes
+        try write(dict, to: url)
+    }
+
+    private static func write(_ dict: [String: [Note]], to url: URL) throws {
+        try JSONFile.save(dict.mapValues(NoteList.init), to: url, backup: true)
     }
 }
 
 /// One note wherever it happens to live, under the key its container writes it with — bundle ID
 /// first, so a single format both labels a note and routes it back to the right store. What the
-/// Tack window lists.
+/// Tack window lists. Several can share a key; the note's id tells them apart.
 struct StoredNote {
     let key: String
     var note: Note
@@ -201,14 +225,20 @@ struct StoredNote {
 
     /// The two stores merged. A folder whose note has gone (moved, deleted, or on an unmounted
     /// volume) drops out rather than failing the whole list — one unreachable note must not cost
-    /// the user the rest of them.
-    static func list(appNotes: [String: Note], folders: [String]) -> [StoredNote] {
-        var all = appNotes.map { StoredNote(key: $0.key, note: $0.value) }
+    /// the user the rest of them. Notes sharing a key stay in the order they were added.
+    static func list(appNotes: [String: [Note]], folders: [String]) -> [StoredNote] {
+        var all = appNotes.flatMap { key, notes in notes.map { StoredNote(key: key, note: $0) } }
         for folder in folders {
-            guard let note = try? NoteStore.load(folder: folder) else { continue }
-            let key = Container.key(path: [FinderContainer.bundleID, folder], level: 1)
-            all.append(StoredNote(key: key, note: note))
+            guard let notes = try? NoteStore.load(folder: folder) else { continue }
+            let key = NoteStore.key(forFolder: folder)
+            all += notes.map { StoredNote(key: key, note: $0) }
         }
-        return all.sorted { $0.key.lowercased() < $1.key.lowercased() }
+        // Sorted by key alone, and stably (Swift's sort isn't), so a place's notes keep their order.
+        return all.enumerated()
+            .sorted { a, b in
+                let (ka, kb) = (a.element.key.lowercased(), b.element.key.lowercased())
+                return ka != kb ? ka < kb : a.offset < b.offset
+            }
+            .map(\.element)
     }
 }

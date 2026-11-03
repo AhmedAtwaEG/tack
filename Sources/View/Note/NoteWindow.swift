@@ -35,6 +35,9 @@ final class NoteWindow: NSObject, NSWindowDelegate {
     var onLiveEdit: ((Note) -> Void)?
 
     private var saveHandler: (Note) -> Bool = { _ in true }  // persists or reports failure
+    /// Which note this window shows. Every save and delete carries it, so the store touches this
+    /// note and none of its neighbours on the same window.
+    private(set) var noteID: String?
     private var active = false  // current folder has a note to show
     private var occluded = false  // the note's spot on the Finder window is covered
     private var shown = false  // what the last pop animated toward (the window stays visible while popping out)
@@ -110,6 +113,12 @@ final class NoteWindow: NSObject, NSWindowDelegate {
         return menu
     }
 
+    /// A re-pin had to give the note a fresh id (its old one was taken at the new level).
+    func adoptID(_ id: String?) { noteID = id }
+
+    /// Where the note sits on its window — for placing a new note so it doesn't land on this one.
+    var offset: (dx: Double, dy: Double) { (anchor.dx, anchor.dy) }
+
     @objc private func levelChosen(_ sender: NSMenuItem) {
         guard saver.flush() else { return }  // never move an older version after a failed save
         guard onPickLevel(sender.tag) else { return }
@@ -120,7 +129,8 @@ final class NoteWindow: NSObject, NSWindowDelegate {
 
     /// The card has already asked; this is what saying yes means for a floating note.
     private func deleteConfirmed() {
-        let deletion = card.deletion(keeping: Note(text: "", dx: anchor.dx, dy: anchor.dy))
+        let deletion = card.deletion(
+            keeping: Note(text: "", dx: anchor.dx, dy: anchor.dy, id: noteID))
         guard saveHandler(deletion) else { return }
         onLiveEdit?(deletion)  // so an open dashboard drops it too, rather than showing a ghost
         saver.cancel()  // a stale delayed save must not recreate the successfully deleted note
@@ -144,6 +154,7 @@ final class NoteWindow: NSObject, NSWindowDelegate {
     func show(note: Note, bounds: CGRect, save: @escaping (Note) -> Bool) -> Bool {
         guard saver.flush() else { return false }
         self.saveHandler = save
+        noteID = note.id
         active = true
         occluded = false  // re-evaluated on the next tracking frame
         card.load(note)
@@ -179,6 +190,13 @@ final class NoteWindow: NSObject, NSWindowDelegate {
     func hide() {
         active = false
         applyVisibility()
+    }
+
+    /// The note was deleted somewhere else (the dashboard): hide it, and drop any edit still
+    /// waiting in the debounce — landing late, it would write the deleted note straight back.
+    func hideDiscardingPendingSave() {
+        saver.cancel()
+        hide()
     }
 
     /// The process may terminate before the debounce delay expires.
@@ -248,12 +266,10 @@ final class NoteWindow: NSObject, NSWindowDelegate {
 
     // MARK: - Tracking
 
-    /// A display link synced to whatever display the note is on, so the caller samples the
+    /// The display the note is on, for a display link synced to it — the caller samples the
     /// window's position in vsync phase at the real refresh rate (120Hz on ProMotion) instead
-    /// of a fixed 60fps timer. Caller owns it: add to a run loop, invalidate to stop.
-    func makeDisplayLink(target: Any, selector: Selector) -> CADisplayLink {
-        window.displayLink(target: target, selector: selector)
-    }
+    /// of a fixed 60fps timer.
+    var screen: NSScreen? { window.screen }
 
     /// The tracked window moved or resized — keep the offset, reposition.
     func updateWindow(bounds: CGRect) { anchor.updateWindow(bounds: bounds) }
@@ -271,7 +287,8 @@ final class NoteWindow: NSObject, NSWindowDelegate {
             text: "", dx: anchor.dx, dy: anchor.dy,
             // intended size, not the capped one
             w: Double(anchor.desired.width), h: Double(anchor.desired.height),
-            collapsed: anchor.collapsed ? true : nil))  // nil keeps expanded notes' files unchanged
+            collapsed: anchor.collapsed ? true : nil,  // nil keeps expanded notes' files unchanged
+            id: noteID))
         // snapshot: an in-flight save must use the handler — and level — of the note it was
         // scheduled for, not whichever note is showing 0.5s later
         onLiveEdit?(note)  // the screen keeps up with the typing; the disk waits for a pause

@@ -45,7 +45,10 @@ class Container {
 
     // MARK: - Storage (subclass supplies)
 
-    func note(at level: Int) throws -> Note? { nil }
+    /// Every note pinned at exactly this level, each with its id.
+    func notes(at level: Int) throws -> [Note] { [] }
+    /// One note into this level by id: replaced, added, or (empty text) removed. The level's
+    /// other notes are left alone.
     func write(_ note: Note, at level: Int) throws {}
 
     // MARK: - Position (subclass supplies)
@@ -54,25 +57,44 @@ class Container {
 
     // MARK: - Lookup
 
-    /// Finest → coarsest, first hit wins, reporting the level it hit at.
+    /// Every note that belongs on this surface: the tab's, then the window's, then the app's, each
+    /// tagged with the level it lives at.
     ///
-    /// This is why the level is never stored in the Note: it *is* whichever prefix the note
-    /// was written under. A window-level note is therefore found by every tab in that window
-    /// for free, and there's no chicken-and-egg where you'd need the level to build the key
-    /// to load the note that holds the level.
-    final func load() throws -> (note: Note, level: Int)? {
-        guard !path.isEmpty else { return nil }
+    /// This is why the level is never stored in the Note: it *is* whichever prefix the note was
+    /// written under. A window-level note is therefore found by every tab in that window for free.
+    ///
+    /// A note is listed once even if it turns up at two levels — which only a move that failed
+    /// halfway leaves behind — at the finer of the two, where the move started from.
+    final func loadAll() throws -> [(note: Note, level: Int)] {
+        guard !path.isEmpty else { return [] }
+        var seen = Set<String>()
+        var out: [(note: Note, level: Int)] = []
         for level in stride(from: finestLevel, through: minLevel, by: -1) {
-            if let n = try note(at: level) { return (n, level) }
+            for n in try notes(at: level) where seen.insert(n.id ?? "").inserted {
+                out.append((n, level))
+            }
         }
-        return nil
+        return out
     }
 
-    /// Write the destination first. If either operation fails, at least one complete copy remains.
-    final func move(_ note: Note, from: Int, to: Int) throws {
-        guard from != to else { return }
-        try write(note, at: to)
-        try write(Note(text: "", dx: note.dx, dy: note.dy, color: note.color), at: from)
+    /// The note with this id, wherever on this surface it lives.
+    final func find(id: String) throws -> (note: Note, level: Int)? {
+        try loadAll().first { $0.note.id == id }
+    }
+
+    /// Re-pin a note to another level. Write the destination first: if either step fails, at
+    /// least one complete copy remains. Returns the note as it now lives — with a fresh id if the
+    /// destination already holds a note under its id, which would otherwise be overwritten.
+    @discardableResult
+    final func move(_ note: Note, from: Int, to: Int) throws -> Note {
+        guard from != to else { return note }
+        var moved = note
+        if try notes(at: to).contains(where: { $0.id == note.id }) { moved.id = UUID().uuidString }
+        try write(moved, at: to)
+        var gone = Note(text: "", dx: note.dx, dy: note.dy, color: note.color)
+        gone.id = note.id  // a deletion is by id: only this note leaves the old level
+        try write(gone, at: from)
+        return moved
     }
 }
 

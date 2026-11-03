@@ -22,6 +22,13 @@ enum SelfTest {
         containerLoadFallback()
         containerPromotion()
         containerMovePreservesSourceOnFailure()
+        containerMoveNeverOverwrites()
+        noteListFormat()
+        noteListApplying()
+        multipleNotesInAFolder()
+        multipleAppNotesAtOneKey()
+        olderNotesGetDistinctIDs()
+        cascadeNewNotes()
         finderContainerRoundTrip()
         genericKeyMatchesLegacyFormat()
         levelLabels()
@@ -172,21 +179,22 @@ enum SelfTest {
         let url = dir.appendingPathComponent("appnotes.json")
 
         assert(try! AppNotes.all(from: url).isEmpty, "no file yet is an empty list, not an error")
-        try! AppNotes.save(key: "com.apple.Preview|Report.pdf", note: Note(text: "a", dx: 1, dy: 2), to: url)
-        try! AppNotes.save(key: "com.apple.Terminal|/dev/ttys003", note: Note(text: "b", dx: 3, dy: 4), to: url)
+        let a = Note(text: "a", dx: 1, dy: 2, id: "a")
+        try! AppNotes.save(key: "com.apple.Preview|Report.pdf", note: a, to: url)
+        try! AppNotes.save(key: "com.apple.Terminal|/dev/ttys003", note: Note(text: "b", dx: 3, dy: 4, id: "b"), to: url)
         let all = try! AppNotes.all(from: url)
         assert(all.keys.sorted() == ["com.apple.Preview|Report.pdf", "com.apple.Terminal|/dev/ttys003"],
             "every stored key is listed")
-        assert(all["com.apple.Preview|Report.pdf"]?.text == "a", "notes come back whole")
+        assert(all["com.apple.Preview|Report.pdf"] == [a], "notes come back whole")
 
-        try! AppNotes.save(key: "com.apple.Preview|Report.pdf", note: Note(text: "", dx: 1, dy: 2), to: url)
+        try! AppNotes.save(key: "com.apple.Preview|Report.pdf", note: Note(text: "", dx: 1, dy: 2, id: "a"), to: url)
         assert(try! AppNotes.all(from: url).keys.sorted() == ["com.apple.Terminal|/dev/ttys003"],
-            "a deleted note leaves the list")
+            "a place whose last note is deleted leaves the list")
 
         // The Finder half: a real folder with a note, and one that has gone since it was indexed.
         let folder = dir.appendingPathComponent("Documents")
         try! FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        try! NoteStore.save(folder: folder.path, note: Note(text: "finder", dx: 5, dy: 6))
+        try! NoteStore.save(folder: folder.path, note: Note(text: "finder", dx: 5, dy: 6, id: "f"))
         defer { NotePreferences.shared.forgetFolder(folder.path) }  // save() indexes the real domain
         let merged = StoredNote.list(
             appNotes: try! AppNotes.all(from: url),
@@ -199,8 +207,14 @@ enum SelfTest {
         assert(merged[1].folder == nil, "an app note has no folder")
         assert(merged[0].note.text == "finder" && merged[1].note.text == "b", "notes survive the merge")
 
-        try! merged[0].save(Note(text: "", dx: 5, dy: 6))
-        assert(try! NoteStore.load(folder: folder.path) == nil, "a StoredNote deletes through its own store")
+        try! merged[0].save(Note(text: "", dx: 5, dy: 6, id: "f"))
+        assert(try! NoteStore.load(folder: folder.path).isEmpty, "a StoredNote deletes through its own store")
+
+        // Several notes at one key: listed one by one, in the order they were added.
+        let many = StoredNote.list(
+            appNotes: ["k": ["3", "1", "2"].map { Note(text: $0, dx: 0, dy: 0, id: $0) }], folders: [])
+        assert(many.map(\.note.text) == ["3", "1", "2"], "a place's notes keep their order: \(many.map(\.note.text))")
+        assert(Set(many.map(\.key)) == ["k"], "and all keep the place's key")
     }
 
     static func noteKeyLabels() {
@@ -241,14 +255,14 @@ enum SelfTest {
         defer { try? FileManager.default.removeItem(at: dir) }
         let url = dir.appendingPathComponent("appnotes.json")
         let key = "selftest|" + UUID().uuidString  // unique: never clobbers a real note
-        let n = Note(text: "hello", dx: 12, dy: 34)
+        let n = Note(text: "hello", dx: 12, dy: 34, id: "n")
         try! AppNotes.save(key: key, note: n, to: url)
         let loaded = try! AppNotes.load(key: key, from: url)
-        assert(loaded == n, "app note round-trip mismatch")
+        assert(loaded == [n], "app note round-trip mismatch")
 
-        try! AppNotes.save(key: key, note: Note(text: "", dx: 12, dy: 34), to: url)
+        try! AppNotes.save(key: key, note: Note(text: "", dx: 12, dy: 34, id: "n"), to: url)
         let deleted = try! AppNotes.load(key: key, from: url)
-        assert(deleted == nil, "empty text should delete the app note")
+        assert(deleted.isEmpty, "empty text should delete the app note")
     }
 
     static func stableKeyMigration() {
@@ -259,15 +273,24 @@ enum SelfTest {
         let id = UUID().uuidString
         let legacy = "selftest|old-title|\(id)"
         let stable = "selftest|\(id)"
-        let n = Note(text: "migrate me", dx: 12, dy: 34)
-        try! AppNotes.save(key: legacy, note: n, to: url)
+        // Written the way an older Tack did: one bare note, no id.
+        try! Data(#"{"\#(legacy)":{"text":"migrate me","dx":12,"dy":34}}"#.utf8).write(to: url)
 
         let migrated = try! AppNotes.load(key: stable, migrating: legacy, from: url)
-        let stableNote = try! AppNotes.load(key: stable, from: url)
-        let legacyNote = try! AppNotes.load(key: legacy, from: url)
-        assert(migrated == n, "legacy note should migrate")
-        assert(stableNote == n, "migrated note should use the stable key")
-        assert(legacyNote == nil, "legacy title-dependent key should be removed")
+        let stableNotes = try! AppNotes.load(key: stable, from: url)
+        let legacyNotes = try! AppNotes.load(key: legacy, from: url)
+        assert(migrated.map(\.text) == ["migrate me"], "legacy note should migrate: \(migrated)")
+        assert(stableNotes == migrated, "migrated note should use the stable key, under the same id")
+        assert(legacyNotes.isEmpty, "legacy title-dependent key should be removed")
+        assert(migrated[0].id == "legacy|\(legacy)|0", "an older note's id comes from where it was read")
+
+        // A place with two notes migrates whole, in one go.
+        let legacy2 = "selftest|older|\(id)", stable2 = "selftest|2|\(id)"
+        for t in ["x", "y"] { try! AppNotes.save(key: legacy2, note: Note(text: t, dx: 0, dy: 0, id: t), to: url) }
+        let both = try! AppNotes.load(key: stable2, migrating: legacy2, from: url)
+        assert(both.map(\.id) == ["x", "y"], "every note at the legacy key moves: \(both)")
+        assert(try! AppNotes.load(key: legacy2, from: url).isEmpty, "and none stay behind")
+        assert(try! AppNotes.load(key: stable, from: url) == stableNotes, "other keys are untouched")
     }
 
     static func notePreferencesPalette() {
@@ -329,14 +352,14 @@ enum SelfTest {
         defer { try? FileManager.default.removeItem(at: dir) }
         let folder = dir.path
 
-        let n = Note(text: "hello", dx: 12, dy: 34)
+        let n = Note(text: "hello", dx: 12, dy: 34, id: "n")
         try! NoteStore.save(folder: folder, note: n)
         let loaded = try! NoteStore.load(folder: folder)
-        assert(loaded == n, "round-trip mismatch")
+        assert(loaded == [n], "round-trip mismatch")
 
-        try! NoteStore.save(folder: folder, note: Note(text: "", dx: 12, dy: 34))
+        try! NoteStore.save(folder: folder, note: Note(text: "", dx: 12, dy: 34, id: "n"))
         let deleted = try! NoteStore.load(folder: folder)
-        assert(deleted == nil, "empty text should delete the note")
+        assert(deleted.isEmpty, "empty text should delete the note")
         assert(
             !FileManager.default.fileExists(atPath: NoteStore.fileURL(forFolder: folder).path),
             "file should be gone")
@@ -372,15 +395,15 @@ enum SelfTest {
         try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let url = dir.appendingPathComponent("appnotes.json")
-        let old = Note(text: "first", dx: 1, dy: 2)
-        let new = Note(text: "second", dx: 3, dy: 4)
+        let old = Note(text: "first", dx: 1, dy: 2, id: "o")
+        let new = Note(text: "second", dx: 3, dy: 4, id: "n")
 
         try! AppNotes.save(key: "old", note: old, to: url)
         try! AppNotes.save(key: "new", note: new, to: url)
         let current = try! AppNotes.load(key: "new", from: url)
         let backup = try! AppNotes.load(key: "old", from: url.appendingPathExtension("backup"))
-        assert(current == new, "the current file should contain the new value")
-        assert(backup == old, "the backup should preserve the previous complete value")
+        assert(current == [new], "the current file should contain the new value")
+        assert(backup == [old], "the backup should preserve the previous complete value")
     }
 
     static func writeFailureIsReported() {
@@ -485,7 +508,7 @@ enum SelfTest {
 private enum FakeWriteError: Error { case blocked }
 
 final class FakeContainer: Container {
-    private var storage: [String: Note] = [:]
+    private var storage: [String: [Note]] = [:]
     private let ident: [String]
     private let stableFinestKey: String?
     var failingLevel: Int?
@@ -498,11 +521,12 @@ final class FakeContainer: Container {
 
     override var path: [String] { ident }
     override var finestKey: String? { stableFinestKey }
-    override func note(at level: Int) throws -> Note? { storage[key(at: level)] }
+    override func notes(at level: Int) throws -> [Note] { storage[key(at: level)] ?? [] }
     override func write(_ note: Note, at level: Int) throws {
         writes.append(level)
         if failingLevel == level { throw FakeWriteError.blocked }
-        storage[key(at: level)] = note.isDeletion ? nil : note
+        let notes = NoteList.applying(note, to: storage[key(at: level)] ?? [])
+        storage[key(at: level)] = notes.isEmpty ? nil : notes
     }
 }
 
@@ -529,40 +553,44 @@ extension SelfTest {
 
     static func containerLoadFallback() {
         let c = FakeContainer(path: ["app", "win", "tab"])
-        let n = Note(text: "hi", dx: 1, dy: 2)
+        let n = Note(text: "hi", dx: 1, dy: 2, id: "w")
 
-        let empty = try! c.load()
-        assert(empty == nil, "no note anywhere should not resolve")
+        assert(try! c.loadAll().isEmpty, "no note anywhere should not resolve")
 
         try! c.write(n, at: 1)  // a window-level note
-        guard let hit = try! c.load() else {
-            assert(false, "a window note should be visible from the tab")
-            return
-        }
-        assert(hit.note == n && hit.level == 1, "should fall back to the window level: \(hit)")
+        let window = try! c.loadAll()
+        assert(window.count == 1 && window[0].note == n && window[0].level == 1,
+            "a window note should be visible from the tab: \(window)")
 
-        try! c.write(Note(text: "tab", dx: 3, dy: 4), at: 2)
-        let finest = try! c.load()
-        assert(finest?.level == 2, "the finest note wins when both exist")
+        // Every level's notes show together now — the tab's first, then the window's, the app's.
+        try! c.write(Note(text: "tab", dx: 3, dy: 4, id: "t"), at: 2)
+        try! c.write(Note(text: "app", dx: 5, dy: 6, id: "a"), at: 0)
+        try! c.write(Note(text: "tab2", dx: 7, dy: 8, id: "t2"), at: 2)
+        let all = try! c.loadAll()
+        assert(all.map(\.note.id) == ["t", "t2", "w", "a"] && all.map(\.level) == [2, 2, 1, 0],
+            "every note on the surface, finest level first: \(all.map { ($0.note.id ?? "-", $0.level) })")
+        assert(try! c.find(id: "w")?.level == 1, "find locates a note's level by id")
+        assert(try! c.find(id: "nope") == nil, "an unknown id finds nothing")
     }
 
     static func containerPromotion() {
         let c = FakeContainer(path: ["app", "win", "tab"])
-        let n = Note(text: "hi", dx: 1, dy: 2)
+        let n = Note(text: "hi", dx: 1, dy: 2, id: "n")
+        let neighbour = Note(text: "stays", dx: 3, dy: 4, id: "s")
         try! c.write(n, at: 2)
+        try! c.write(neighbour, at: 2)
 
-        try! c.move(n, from: 2, to: 1)
-        let old = try! c.note(at: 2)
-        let promoted = try! c.note(at: 1)
-        let loaded = try! c.load()
-        assert(old == nil, "the old key should be gone after promotion")
-        assert(promoted == n, "the note should live at the window level now")
-        assert(loaded?.level == 1, "and lookup should find it there")
+        let moved = try! c.move(n, from: 2, to: 1)
+        assert(moved == n, "a move to a free level keeps the note exactly, id included")
+        assert(try! c.notes(at: 2) == [neighbour], "only the moved note leaves the tab")
+        assert(try! c.notes(at: 1) == [n], "the note should live at the window level now")
+        assert(try! c.find(id: "n")?.level == 1, "and lookup should find it there")
+        assert(try! c.move(n, from: 1, to: 1) == n && (try! c.notes(at: 1)) == [n], "a move to its own level is a no-op")
     }
 
     static func containerMovePreservesSourceOnFailure() {
         let c = FakeContainer(path: ["app", "win", "tab"])
-        let n = Note(text: "safe", dx: 1, dy: 2)
+        let n = Note(text: "safe", dx: 1, dy: 2, id: "n")
         try! c.write(n, at: 2)
         c.writes = []
         c.failingLevel = 1
@@ -572,8 +600,7 @@ extension SelfTest {
             assert(false, "a failed destination write must throw")
         } catch {}
         assert(c.writes == [1], "destination must be attempted before source deletion")
-        let source = try! c.note(at: 2)
-        assert(source == n, "a failed destination write must preserve the source")
+        assert(try! c.notes(at: 2) == [n], "a failed destination write must preserve the source")
 
         c.writes = []
         c.failingLevel = 2
@@ -582,9 +609,24 @@ extension SelfTest {
             assert(false, "a failed source deletion must throw")
         } catch {}
         assert(c.writes == [1, 2], "move must write destination, then delete source")
-        let duplicatedSource = try! c.note(at: 2)
-        let destination = try! c.note(at: 1)
-        assert(duplicatedSource == n && destination == n, "failure may duplicate, never lose the note")
+        assert(try! c.notes(at: 2) == [n] && (try! c.notes(at: 1)) == [n], "failure may duplicate, never lose the note")
+        let shown = try! c.loadAll()
+        assert(shown.count == 1 && shown[0].level == 2, "a duplicate shows once, at the level it was moving from")
+    }
+
+    static func containerMoveNeverOverwrites() {
+        // Two different notes that ended up sharing an id at two levels (ids are per place, and
+        // hand-edited or older files can collide): moving one onto the other must not replace it.
+        let c = FakeContainer(path: ["app", "win", "tab"])
+        let mover = Note(text: "mover", dx: 1, dy: 2, id: "x")
+        let resident = Note(text: "resident", dx: 3, dy: 4, id: "x")
+        try! c.write(mover, at: 2)
+        try! c.write(resident, at: 1)
+
+        let moved = try! c.move(mover, from: 2, to: 1)
+        assert(moved.id != "x" && moved.text == "mover", "a taken id is replaced by a fresh one")
+        assert(try! c.notes(at: 1).map(\.text) == ["resident", "mover"], "the resident note survives")
+        assert(try! c.notes(at: 2).isEmpty, "and the mover left its old level")
     }
 
     static func finderContainerRoundTrip() {
@@ -600,17 +642,14 @@ extension SelfTest {
         assert(c.minLevel == 1, "Finder should not offer promotion")
         assert(c.finestLevel == 1, "finder path should be two components")
 
-        let n = Note(text: "hi", dx: 1, dy: 2)
+        let n = Note(text: "hi", dx: 1, dy: 2, id: "n")
         try! c.write(n, at: 1)
-        guard let hit = try! c.load() else {
-            assert(false, "finder note should round-trip")
-            return
-        }
-        assert(hit.note == n && hit.level == 1, "finder round-trip mismatch: \(hit)")
+        let hits = try! c.loadAll()
+        assert(hits.count == 1 && hits[0].note == n && hits[0].level == 1, "finder round-trip mismatch: \(hits)")
 
-        try! c.write(Note(text: "", dx: 1, dy: 2), at: 1)
-        let deleted = try! c.load()
-        assert(deleted == nil, "empty text should delete the folder note")
+        try! c.write(Note(text: "", dx: 1, dy: 2, id: "n"), at: 1)
+        assert(try! c.loadAll().isEmpty, "empty text should delete the folder note")
+        NotePreferences.shared.forgetFolder(dir.path)
     }
 
     static func genericKeyMatchesLegacyFormat() {
@@ -959,5 +998,177 @@ extension SelfTest {
         // Anything unparseable is used as-is rather than crashing or collapsing to "".
         assert(BrowserContainer.normalize("notaurl") == "notaurl", "garbage should pass through")
         assert(BrowserContainer.normalize("") == "", "empty should pass through")
+    }
+}
+
+// MARK: - Several notes per place
+
+extension SelfTest {
+    private static func json(_ value: some Encodable) -> String {
+        String(data: try! JSONEncoder().encode(value), encoding: .utf8)!
+    }
+
+    static func noteListFormat() {
+        // Reading: the pre-multi-note shape (one bare object) and the list shape both decode.
+        let bare = #"{"text":"old","dx":1,"dy":2}"#
+        let one = try! JSONDecoder().decode(NoteList.self, from: Data(bare.utf8))
+        assert(one.notes.map(\.text) == ["old"], "a single older note decodes as a list of one")
+        let many = try! JSONDecoder().decode(
+            NoteList.self, from: Data(#"[{"text":"a","dx":1,"dy":2,"id":"a"},{"text":"b","dx":3,"dy":4,"id":"b"}]"#.utf8))
+        assert(many.notes.map(\.id) == ["a", "b"], "a list decodes in order")
+
+        // Writing: one note stays a bare object — exactly what an older Tack reads as `Note` —
+        // and only two or more become an array.
+        let single = NoteList([Note(text: "solo", dx: 1, dy: 2, id: "s")])
+        let singleJSON = json(single)
+        assert(singleJSON.hasPrefix("{"), "one note is written as a bare object: \(singleJSON)")
+        let asOlderTackReadsIt = try? JSONDecoder().decode(Note.self, from: Data(singleJSON.utf8))
+        assert(asOlderTackReadsIt?.text == "solo", "a one-note place stays readable as a plain Note")
+        assert(json(many).hasPrefix("["), "two notes are written as an array")
+        assert(try! JSONDecoder().decode(NoteList.self, from: Data(json(many).utf8)) == many, "a list round-trips")
+
+        // Garbage is still an error (the stores turn it into a preserved recovery copy).
+        for bad in [#""text""#, "[1,2]", #"{"dx":1}"#, "[]x"] {
+            assert((try? JSONDecoder().decode(NoteList.self, from: Data(bad.utf8))) == nil,
+                "\(bad) must not decode as notes")
+        }
+
+        // Ids for notes written before ids existed: stable per place and position.
+        let ids = NoteList([Note(text: "a", dx: 0, dy: 0), Note(text: "b", dx: 0, dy: 0, id: "kept"),
+            Note(text: "c", dx: 0, dy: 0, id: "")]).identified(key: "app|win")
+        assert(ids.map(\.id) == ["legacy|app|win|0", "kept", "legacy|app|win|2"],
+            "missing or empty ids are derived; real ones are kept: \(ids.map(\.id))")
+    }
+
+    static func noteListApplying() {
+        let a = Note(text: "a", dx: 0, dy: 0, id: "a")
+        let b = Note(text: "b", dx: 0, dy: 0, id: "b")
+        let c = Note(text: "c", dx: 0, dy: 0, id: "c")
+        var a2 = a
+        a2.text = "a edited"
+        assert(NoteList.applying(c, to: [a, b]) == [a, b, c], "a new id is appended")
+        assert(NoteList.applying(a2, to: [a, b, c]) == [a2, b, c], "an edit replaces in place, order kept")
+        let delB = Note(text: "", dx: 0, dy: 0, id: "b")
+        assert(NoteList.applying(delB, to: [a, b, c]) == [a, c], "a deletion removes only its own id")
+        assert(NoteList.applying(delB, to: [a, c]) == [a, c], "deleting a note that isn't there is a no-op")
+        assert(NoteList.applying(Note(text: "", dx: 0, dy: 0, id: "a"), to: [a]).isEmpty, "the last one out empties the place")
+        assert(NoteList.applying(delB, to: []).isEmpty, "a never-saved note's deletion writes nothing")
+    }
+
+    static func multipleNotesInAFolder() {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        defer { NotePreferences.shared.forgetFolder(dir.path) }
+        let folder = dir.path, url = NoteStore.fileURL(forFolder: folder)
+
+        // A folder note written by an older Tack: one bare object, no id.
+        try! Data(#"{"text":"from before","dx":5,"dy":6,"color":"FFEB73"}"#.utf8).write(to: url)
+        let legacy = try! NoteStore.load(folder: folder)
+        assert(legacy.count == 1 && legacy[0].id == "legacy|\(NoteStore.key(forFolder: folder))|0",
+            "an older folder note loads with a derived id: \(legacy)")
+        assert(try! NoteStore.load(folder: folder) == legacy, "and gets the same id on every read")
+
+        // A second note joins it: the file becomes a list, the older note keeps its id and data.
+        let second = Note(text: "second", dx: 30, dy: 40, id: "2")
+        try! NoteStore.save(folder: folder, note: second)
+        let both = try! NoteStore.load(folder: folder)
+        assert(both == [legacy[0], second], "both notes, older first: \(both)")
+        assert(String(data: try! Data(contentsOf: url), encoding: .utf8)!.hasPrefix("["), "two notes make an array")
+
+        // Editing one leaves the other exactly as it was, and keeps the order.
+        var edited = legacy[0]
+        edited.text = "from before, edited"
+        try! NoteStore.save(folder: folder, note: edited)
+        assert(try! NoteStore.load(folder: folder) == [edited, second], "an edit touches only its own note")
+
+        // Deleting one goes back to the single-object format an older Tack can read.
+        try! NoteStore.save(folder: folder, note: Note(text: "", dx: 0, dy: 0, id: edited.id))
+        assert(try! NoteStore.load(folder: folder) == [second], "only the deleted note goes")
+        let onDisk = try? JSONDecoder().decode(Note.self, from: try! Data(contentsOf: url))
+        assert(onDisk?.text == "second", "one note left is written as a plain Note again")
+        assert(NotePreferences.shared.knownFolders.contains(folder), "a folder with a note stays indexed")
+
+        // The last note out takes the file and the index entry with it.
+        try! NoteStore.save(folder: folder, note: Note(text: "", dx: 0, dy: 0, id: "2"))
+        assert(!FileManager.default.fileExists(atPath: url.path), "no notes left, no file")
+        assert(!NotePreferences.shared.knownFolders.contains(folder), "and the folder leaves the index")
+    }
+
+    static func multipleAppNotesAtOneKey() {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("appnotes.json")
+        let key = "com.tinyspeck.slackmacgap|general", other = "com.apple.Preview|Report.pdf"
+        let elsewhere = Note(text: "elsewhere", dx: 0, dy: 0, id: "e")
+        try! AppNotes.save(key: other, note: elsewhere, to: url)
+
+        // Two windows' worth of saves interleaving, the way two debounced notes do: neither may
+        // clobber the other, since each write reads the place fresh and changes only its own id.
+        var one = Note(text: "one", dx: 10, dy: 10, id: "1")
+        var two = Note(text: "two", dx: 40, dy: 40, id: "2")
+        try! AppNotes.save(key: key, note: one, to: url)
+        try! AppNotes.save(key: key, note: two, to: url)
+        one.text = "one, typed more"
+        try! AppNotes.save(key: key, note: one, to: url)
+        two.collapsed = true
+        try! AppNotes.save(key: key, note: two, to: url)
+        assert(try! AppNotes.load(key: key, from: url) == [one, two], "both notes keep their own latest edit")
+        assert(try! AppNotes.load(key: other, from: url) == [elsewhere], "other places are untouched")
+
+        try! AppNotes.save(key: key, note: Note(text: "", dx: 0, dy: 0, id: "1"), to: url)
+        assert(try! AppNotes.load(key: key, from: url) == [two], "deleting one note keeps the other")
+        try! AppNotes.save(key: key, note: Note(text: "", dx: 0, dy: 0, id: "2"), to: url)
+        assert(try! AppNotes.all(from: url).keys.sorted() == [other], "the emptied place leaves the file")
+    }
+
+    static func olderNotesGetDistinctIDs() {
+        // Older notes at a tab and its window both sit at position 0 of their place. Their
+        // derived ids must differ, or showing every level at once would treat them as one note
+        // and hide one of them.
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("appnotes.json")
+        try! Data(#"{"app|win":{"text":"window","dx":1,"dy":1},"app":{"text":"app","dx":2,"dy":2}}"#.utf8).write(to: url)
+        let all = try! AppNotes.all(from: url)
+        let ids = [all["app|win"]![0].id!, all["app"]![0].id!]
+        assert(Set(ids).count == 2, "older notes at different places get different ids: \(ids)")
+    }
+
+    static func cascadeNewNotes() {
+        let note = CGSize(width: 220, height: 170), window = CGSize(width: 800, height: 600)
+        let start = (dx: 100.0, dy: 100.0)
+        func at(_ taken: [(dx: Double, dy: Double)]) -> (dx: Double, dy: Double) {
+            Coord.cascade(from: start, avoiding: taken, note: note, window: window)
+        }
+        let free = at([])
+        assert(free == (100, 100), "nothing in the way: the note goes where asked")
+        let second = at([start])
+        assert(second == (124, 124), "taken: one step down and right: \(second)")
+        let third = at([start, second])
+        assert(third == (148, 148), "and again: \(third)")
+        let near = at([(dx: 110, dy: 90)])
+        assert(near.dx != 100 || near.dy != 100, "a note a few points off still counts as in the way")
+
+        // Stepping off the bottom-right wraps back inside the window rather than escaping it.
+        let corner = (dx: 580.0, dy: 430.0)  // the furthest a 220x170 note can sit
+        let wrapped = Coord.cascade(from: corner, avoiding: [corner], note: note, window: window)
+        assert(wrapped.dx >= 0 && wrapped.dy >= 0 && wrapped.dx + 220 <= 800 && wrapped.dy + 170 <= 600,
+            "a cascaded note stays inside the window: \(wrapped)")
+        assert(wrapped != corner, "and doesn't land back on the note it was avoiding")
+
+        // No free spot at all (a window the note fills): it still ends, inside the window.
+        let full = Coord.cascade(from: (0, 0), avoiding: [(0, 0)], note: note, window: CGSize(width: 220, height: 170))
+        assert(full == (0, 0), "a window with no room settles on the only spot there is: \(full)")
+
+        // A crowd of notes: every one placed still lands inside, and they don't pile up.
+        var taken: [(dx: Double, dy: Double)] = []
+        for _ in 0..<30 { taken.append(Coord.cascade(from: start, avoiding: taken, note: note, window: window)) }
+        assert(taken.allSatisfy { $0.dx >= 0 && $0.dy >= 0 && $0.dx + 220 <= 800 && $0.dy + 170 <= 600 },
+            "every cascaded note stays inside the window")
+        let distinct = Set(taken.map { "\(Int($0.dx)),\(Int($0.dy))" })
+        assert(distinct.count == 30, "thirty notes, thirty different spots: \(distinct.count)")
     }
 }

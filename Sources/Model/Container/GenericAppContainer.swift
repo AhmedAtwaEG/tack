@@ -29,7 +29,7 @@ class GenericAppContainer: Container {
 
     override var path: [String] { ident.isEmpty ? [bundleID] : [bundleID, ident] }
 
-    override func note(at level: Int) throws -> Note? {
+    override func notes(at level: Int) throws -> [Note] {
         let currentKey = key(at: level)
         // Before stable tab keys, the mutable title was part of the key. Migrate on first read;
         // writing the new key before deleting the old one makes an interrupted migration harmless.

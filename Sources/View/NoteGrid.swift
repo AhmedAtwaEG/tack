@@ -89,7 +89,8 @@ final class NoteGrid: NSObject, NSWindowDelegate {
     /// built at until the next reload. Reframing mid-type would reflow the whole grid under the
     /// cursor, which is worse than a stale size.
     func update(key: String, note: Note) {
-        if let cell = cells.first(where: { $0.key == key }) {
+        // Several notes can share a key now; the id says which of them this is.
+        if let cell = cells.first(where: { $0.key == key && $0.noteID == note.id }) {
             guard !note.isDeletion else { return drop(cell) }
             cell.apply(note)
             return
@@ -192,6 +193,7 @@ private final class NoteGridCell: NSView {
     var onLiveEdit: (String, Note) -> Void = { _, _ in }
 
     var key: String { stored.key }
+    var noteID: String? { stored.note.id }
 
     init(stored: StoredNote) {
         self.stored = stored

@@ -52,6 +52,31 @@ enum Coord {
         return (Double(window.width - size.width) / 2, Double(window.height - size.height) / 2)
     }
 
+    /// Where another note goes when `start` is already taken: stepped down and right, Stickies
+    /// style, until it's clear of every note in `taken` — wrapping back towards the top-left when
+    /// it would run off the window. Always inside the window, and always ends: with no free spot
+    /// left (a window full of notes, or one too small to step in) it settles for the last tried.
+    static func cascade(
+        from start: (dx: Double, dy: Double), avoiding taken: [(dx: Double, dy: Double)],
+        note: CGSize, window: CGSize, step: Double = 24
+    ) -> (dx: Double, dy: Double) {
+        let size = fit(desired: note, window: window)
+        func isTaken(_ p: (dx: Double, dy: Double)) -> Bool {
+            taken.contains { abs($0.dx - p.dx) < step / 2 && abs($0.dy - p.dy) < step / 2 }
+        }
+        var spot = clamp(dx: start.dx, dy: start.dy, note: size, window: window)
+        var wraps = 0.0
+        for _ in 0..<64 where isTaken(spot) {
+            var next = (dx: spot.dx + step, dy: spot.dy + step)
+            if next.dx + size.width > window.width || next.dy + size.height > window.height {
+                wraps += 1  // each pass down the window starts a little further right
+                next = (dx: wraps * step / 3, dy: 0)
+            }
+            spot = clamp(dx: next.dx, dy: next.dy, note: size, window: window)
+        }
+        return spot
+    }
+
     /// A *user resize*, held inside the window: whichever edge ran past a border is cut back to
     /// it, leaving the opposite edge where it is. `clamp` can't do this job — it slides the whole
     /// note over, so pushing one edge into the border grew the note out of the other side.
