@@ -18,6 +18,12 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/$EXE"
 cp Info.plist "$APP/Contents/Info.plist"
+# The updater compares this against the latest release, so it must be the real version: CI
+# passes the tag it is building; a local build takes the last tag it sits on (or after).
+VERSION="${VERSION:-$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')}"
+VERSION="${VERSION:-0.0.0}"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" \
+  -c "Set :CFBundleVersion $VERSION" "$APP/Contents/Info.plist"
 # icon.png is the bare artwork at any size; macOS wants it 824x824 centred in a
 # 1024 canvas, or the icon reads bigger than every neighbour in the Dock.
 # `sips -c` grows the canvas with transparent padding; -z then downscales per slot.
@@ -38,7 +44,8 @@ if [ -z "$SIGN_ID" ] && security find-certificate -c "Tack Local Signing" >/dev/
   SIGN_ID="Tack Local Signing"
 fi
 [ -n "$SIGN_ID" ] || { echo "No codesigning identity in keychain; see README." >&2; exit 1; }
-codesign --force --sign "$SIGN_ID" "$APP"
+# SIGN_KEYCHAIN: CI signs from a keychain of its own rather than the login one.
+codesign --force ${SIGN_KEYCHAIN:+--keychain "$SIGN_KEYCHAIN"} --sign "$SIGN_ID" "$APP"
 
 # ponytail: rm before cp — cp -R into an existing .app nests it instead of replacing.
 rm -rf "/Applications/$APP"

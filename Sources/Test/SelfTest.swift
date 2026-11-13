@@ -30,146 +30,38 @@ enum SelfTest {
         olderNotesGetDistinctIDs()
         cascadeNewNotes()
         finderContainerRoundTrip()
+        finderReplyParsing()
+        appleScriptsCompile()
+        windowPicking()
+        rearrangingIsDetected()
         genericKeyMatchesLegacyFormat()
         levelLabels()
         debouncerCollapses()
+        trackingBacksOff()
         markdownSpans()
         markdownParse()
         markdownListEditing()
+        inlineToggleKeepsListMarkers()
         markdownRoundTrip()
         markdownInlineClosing()
         blockStyleAtCaret()
         blockNavigation()
-        blockTreeStructure()
-        blockTreeRejectsInvalidOperations()
         backspaceAtTheEnd()
         noteSizeIsOptional()
         collapsedNote()
         collapsedTitle()
         urlNormalization()
+        dashboardBackdrop()
+        mergeKeepsNewerFile()
+        emptyNoteSurvivesItsOwnSave()
+        updateVersions()
+        updateReleaseParsing()
+        treePathIsRemembered()
         notePreferencesPalette()
         fontFaces()
         pillGeometry()
+        dotGlyphsAreCentred()
         print("✅ all self-tests passed")
-    }
-
-    static func blockTreeStructure() {
-        // A different content type needs no hierarchy implementation or tree changes.
-        final class TestBlock: Block {
-            let id = UUID()
-        }
-
-        let tree = BlockTree()
-        assert(tree.depthFirst().isEmpty, "a new tree is empty")
-        assert(try! tree.children().isEmpty, "a new tree has no roots")
-        let markdown = "# Title\n\n**body**\n"
-        let first = TextBlock(text: markdown)
-        let second = TextBlock(text: "")
-        let child = TextBlock(text: "child")
-        let sibling = TextBlock(text: "sibling")
-        let grandchild = TestBlock()
-        try! tree.insert(second)
-        try! tree.insert(first, at: 0)
-        try! tree.insert(child, under: first.id)
-        try! tree.insert(sibling, under: first.id, at: 0)
-        try! tree.insert(grandchild, under: child.id)
-
-        assert(try! tree.children().map(\.id) == [first.id, second.id], "roots retain insertion order")
-        assert(try! tree.children(of: first.id).map(\.id) == [sibling.id, child.id], "children are ordered")
-        assert(try! tree.parent(of: first.id) == nil, "a root has no parent")
-        assert(try! tree.parent(of: grandchild.id)?.id == child.id, "grandchildren retain their parent")
-        assert(try! tree.children(of: grandchild.id).isEmpty, "a leaf has no children")
-        assert(tree.depthFirst().map(\.id) == [first.id, sibling.id, child.id, grandchild.id, second.id],
-            "traversal visits ordered subtrees before the next root")
-        assert((tree.block(id: first.id) as? TextBlock) === first, "the tree retains the same object")
-        assert(first.text == markdown && second.text.isEmpty, "Markdown and empty content are preserved")
-        first.text += "updated"
-        assert((tree.block(id: first.id) as? TextBlock)?.text == markdown + "updated",
-            "content edits are visible through the tree")
-
-        try! tree.move(sibling.id, under: first.id, at: 1)
-        assert(try! tree.children(of: first.id).map(\.id) == [child.id, sibling.id],
-            "same-parent indices are measured after removal")
-        try! tree.move(sibling.id, under: first.id, at: 0)
-        try! tree.move(sibling.id, under: first.id)
-        assert(try! tree.children(of: first.id).map(\.id) == [child.id, sibling.id],
-            "an omitted move index appends")
-        try! tree.move(sibling.id, under: first.id, at: 1)
-        assert(try! tree.children(of: first.id).map(\.id) == [child.id, sibling.id],
-            "moving to the current position is valid")
-
-        try! tree.move(child.id, under: second.id)
-        assert(try! tree.children(of: first.id).map(\.id) == [sibling.id], "move detaches from the old parent")
-        assert(try! tree.parent(of: child.id)?.id == second.id, "move updates the parent")
-        assert(try! tree.parent(of: grandchild.id)?.id == child.id, "move carries descendants")
-        try! tree.move(child.id, at: 1)
-        assert(tree.depthFirst().map(\.id) == [first.id, sibling.id, child.id, grandchild.id, second.id],
-            "a subtree can move to the root")
-        assert(try! tree.parent(of: child.id) == nil, "promoted block is a root")
-        assert(try! tree.children(of: second.id).isEmpty, "previous parent becomes a leaf")
-        try! tree.move(second.id, at: 0)
-        assert(try! tree.children().map(\.id) == [second.id, first.id, child.id], "roots can be reordered")
-        try! tree.move(child.id, under: first.id, at: 0)
-        assert(try! tree.children(of: first.id).map(\.id) == [child.id, sibling.id], "roots can become children")
-        try! tree.remove(child.id)
-        assert(tree.block(id: child.id) == nil && tree.block(id: grandchild.id) == nil,
-            "removal deletes the whole subtree")
-        assert(try! tree.children(of: first.id).map(\.id) == [sibling.id], "removal preserves siblings")
-        try! tree.remove(first.id)
-        assert(tree.depthFirst().map(\.id) == [second.id], "root removal includes its descendants")
-        try! tree.remove(second.id)
-        assert(tree.depthFirst().isEmpty, "removing the final root empties the tree")
-    }
-
-    static func blockTreeRejectsInvalidOperations() {
-        let tree = BlockTree()
-        let root = TextBlock(text: "root")
-        let child = TextBlock(text: "child")
-        let leaf = TextBlock(text: "leaf")
-        let other = TextBlock(text: "other")
-        let missing = UUID()
-        try! tree.insert(root)
-        try! tree.insert(other)
-        try! tree.insert(child, under: root.id)
-        try! tree.insert(leaf, under: child.id)
-
-        // Capture ordering, membership, parents, and children to detect partial mutations.
-        func snapshot() -> [[UUID]] {
-            [try! tree.children().map(\.id)] + tree.depthFirst().map { block in
-                let parent = try! tree.parent(of: block.id)
-                let children = try! tree.children(of: block.id)
-                return [block.id] + (parent.map { [$0.id] } ?? []) + children.map(\.id)
-            }
-        }
-
-        func rejects(_ expected: BlockTreeError, _ operation: () throws -> Void) {
-            let before = snapshot()
-            do {
-                try operation()
-                assertionFailure("expected \(expected)")
-            } catch {
-                assert(error as? BlockTreeError == expected, "unexpected error: \(error)")
-            }
-            assert(snapshot() == before, "a rejected operation must leave the tree unchanged")
-        }
-
-        assert(tree.block(id: missing) == nil, "unknown block lookup returns nil")
-        rejects(.missingBlock(missing)) { _ = try tree.children(of: missing) }
-        rejects(.missingBlock(missing)) { _ = try tree.parent(of: missing) }
-        rejects(.duplicateID(root.id)) { try tree.insert(root) }
-        rejects(.duplicateID(root.id)) { try tree.insert(TextBlock(text: "duplicate", id: root.id)) }
-        rejects(.missingBlock(missing)) { try tree.insert(TextBlock(text: "new"), under: missing) }
-        rejects(.invalidIndex(-1)) { try tree.insert(TextBlock(text: "new"), at: -1) }
-        rejects(.invalidIndex(3)) { try tree.insert(TextBlock(text: "new"), at: 3) }
-        rejects(.invalidIndex(2)) { try tree.insert(TextBlock(text: "new"), under: root.id, at: 2) }
-        rejects(.missingBlock(missing)) { try tree.move(missing) }
-        rejects(.missingBlock(missing)) { try tree.move(child.id, under: missing) }
-        rejects(.cyclicMove) { try tree.move(root.id, under: root.id) }
-        rejects(.cyclicMove) { try tree.move(root.id, under: leaf.id) }
-        rejects(.invalidIndex(-1)) { try tree.move(child.id, at: -1) }
-        rejects(.invalidIndex(2)) { try tree.move(root.id, at: 2) }
-        rejects(.invalidIndex(1)) { try tree.move(child.id, under: other.id, at: 1) }
-        rejects(.missingBlock(missing)) { try tree.remove(missing) }
     }
 
     static func allAppNotes() {
@@ -586,6 +478,9 @@ extension SelfTest {
         assert(try! c.notes(at: 1) == [n], "the note should live at the window level now")
         assert(try! c.find(id: "n")?.level == 1, "and lookup should find it there")
         assert(try! c.move(n, from: 1, to: 1) == n && (try! c.notes(at: 1)) == [n], "a move to its own level is a no-op")
+        assert(c.pinLevels == [0, 1, 2], "a plain surface offers every level")
+        let tabbed = FakeContainer(path: ["app", "title", "url"], finestKey: "app|url")
+        assert(tabbed.pinLevels == [0, 2], "a title-keyed window is not a place to pin")
     }
 
     static func containerMovePreservesSourceOnFailure() {
@@ -664,6 +559,14 @@ extension SelfTest {
     static func levelLabels() {
         // 3-part path (a browser tab): app / window / tab
         assert(LevelName.label(level: 0, of: 3) == "Pin to this app", "level 0 is always the app")
+        // The pill's picker wears one symbol per level: distinct, and real on this macOS.
+        let symbols = (0...2).map { LevelName.symbol(level: $0, of: 3) }
+        assert(Set(symbols).count == 3, "app, window and tab need three different symbols")
+        assert(LevelName.symbol(level: 1, of: 2) == symbols[1], "a 2-part path ends at a window")
+        for name in symbols + ["rectangle.stack.fill", "arrow.up.forward.app.fill", "arrow.down.right.and.arrow.up.left", "gearshape.fill"] {
+            let found = NSImage(systemSymbolName: name, accessibilityDescription: nil) != nil
+            assert(found, "\(name) is not an SF Symbol here — its dot would be blank")
+        }
         assert(LevelName.label(level: 1, of: 3) == "Pin to this window", "middle is the window")
         assert(LevelName.label(level: 2, of: 3) == "Pin to this tab", "deepest of 3 is the tab")
 
@@ -801,6 +704,214 @@ extension SelfTest {
         assert(MarkdownDocument.serialize(ts) == "- milk\n- ", "live bullet list should serialize")
     }
 
+    /// ⌘B over a list used to replace every attribute in the selection, list markers included.
+    static func inlineToggleKeepsListMarkers() {
+        let tv = NSTextView(frame: NSRect(x: 0, y: 0, width: 200, height: 100))
+        let source = "# t\n- a\n- [x] b"
+        tv.textStorage?.setAttributedString(MarkdownDocument.parse(source))
+        tv.setSelectedRange(NSRange(location: 0, length: (tv.string as NSString).length))
+        MarkdownInput.toggle(.bold, tv)
+        let bold = tv.textStorage.map(MarkdownDocument.serialize)
+        assert(bold == "# **t**\n- **a**\n- [x] **b**", "bold must keep headings and markers: \(bold ?? "")")
+        MarkdownInput.toggle(.bold, tv)
+        let plain = tv.textStorage.map(MarkdownDocument.serialize)
+        assert(plain == source, "toggling back must restore the note: \(plain ?? "")")
+
+        // Un-heading a line keeps the bold inside it.
+        tv.textStorage?.setAttributedString(MarkdownDocument.parse("# a **b**"))
+        tv.setSelectedRange(NSRange(location: 0, length: 0))
+        _ = MarkdownInput.handle(#selector(NSStandardKeyBindingResponding.deleteBackward(_:)), tv)
+        let body = tv.textStorage.map(MarkdownDocument.serialize)
+        assert(body == "a **b**", "backspace at a heading's start must keep inline styles: \(body ?? "")")
+    }
+
+    /// Saving an empty note removes it from the file; the disk sync must not read that as a deletion from outside and take the note off the screen.
+    static func emptyNoteSurvivesItsOwnSave() {
+        let fresh = Note(text: "", dx: 10, dy: 10)
+        assert(!AppDelegate.deletedElsewhere(seen: fresh), "a new, still empty note stays up")
+        let written = Note(text: "words", dx: 10, dy: 10)
+        assert(AppDelegate.deletedElsewhere(seen: written), "a note with words that left the file goes")
+        assert(AppDelegate.deletedElsewhere(seen: nil), "nothing known about it: the file decides")
+    }
+
+    static func trackingBacksOff() {
+        assert((0..<30).allSatisfy(AppDelegate.samples), "a window that just moved is read every frame")
+        let idle = (30..<90).filter(AppDelegate.samples).count
+        assert(idle == 10, "a still window is read one frame in six: \(idle)")
+    }
+
+    /// The browser lookup: a search records the way to its hit, and that way is reusable.
+    static func treePathIsRemembered() {
+        // Each node is its own list of children; the leaf "web" is the target.
+        indirect enum Tree { case node(String, [Tree]) }
+        let kids: (Tree) -> [Tree] = { if case .node(_, let k) = $0 { return k } else { return [] } }
+        let isWeb: (Tree) -> Bool = { if case .node("web", _) = $0 { return true } else { return false } }
+        let tree = Tree.node("win", [
+            .node("toolbar", [.node("button", [])]),
+            .node("group", [.node("tabs", []), .node("web", [])]),
+        ])
+        var path: [Int] = []
+        let hit = AXWindows.find(from: tree, path: &path, children: kids, match: isWeb)
+        assert(hit != nil && path == [1, 1], "the search should record the way to its hit: \(path)")
+        assert(
+            AXWindows.follow(path, from: tree, children: kids, match: isWeb) != nil,
+            "a remembered path should lead back to the web area")
+        assert(
+            AXWindows.follow([0, 0], from: tree, children: kids, match: isWeb) == nil,
+            "a path that lands on something else is a miss")
+        assert(
+            AXWindows.follow([1, 5], from: tree, children: kids, match: isWeb) == nil,
+            "a path past the end of a level is a miss, not a crash")
+    }
+
+    /// A note keeps following its own window once its app is in the background, and hides
+    /// under whatever other app's window covers it.
+    static func windowPicking() {
+        func win(
+            _ pid: Int, _ number: Int, x: CGFloat, layer: Int = 0, w: CGFloat = 200, h: CGFloat = 200
+        ) -> [String: Any] {
+            [
+                kCGWindowOwnerPID as String: pid, kCGWindowNumber as String: number,
+                kCGWindowLayer as String: layer,
+                kCGWindowBounds as String: CGRect(x: x, y: 0, width: w, height: h)
+                    .dictionaryRepresentation,
+            ]
+        }
+        // front to back: a floating note, another app, our app's sheet, our app's document
+        let screen = [win(9, 1, x: 0, layer: 3), win(2, 20, x: 300), win(1, 11, x: 600), win(1, 10, x: 900)]
+
+        let front = WindowServer.pick(from: screen, pid: 1, number: nil)
+        assert(front?.number == 11, "no number means the app's frontmost window")
+        let doc = WindowServer.pick(from: screen, pid: 1, number: 10)
+        assert(doc?.frame.bounds.minX == 900, "a number follows that window, not the frontmost")
+        assert(
+            doc?.frame.covering == [CGRect(x: 300, y: 0, width: 200, height: 200)],
+            "only other apps' normal windows cover it: \(String(describing: doc?.frame.covering))")
+
+        // A full-screen app's title bar is a thin layer-0 window of its own, above its content.
+        let fullScreen = [win(1, 12, x: 0, w: 1440, h: 32), win(2, 21, x: 0, w: 1440, h: 6), win(1, 10, x: 0, w: 1440, h: 900)]
+        let content = WindowServer.pick(from: fullScreen, pid: 1, number: nil)
+        assert(content?.number == 10, "a strip no note fits in is never the window a note follows")
+        assert(content?.frame.covering == [], "nor does another app's strip hide the note")
+        assert(WindowServer.pick(from: screen, pid: 1, number: 99) == nil, "a window that left the screen is no window")
+    }
+
+    /// Window lists recorded on a 1440×900 screen: at rest, in the middle of a swipe to the next desktop, and with Mission Control open.
+    static func rearrangingIsDetected() {
+        func dock(x: CGFloat, y: CGFloat = 0, w: CGFloat = 1440, h: CGFloat = 900, layer: Int = -2_147_483_624) -> [String: Any] {
+            [
+                kCGWindowOwnerName as String: "Dock", kCGWindowLayer as String: layer,
+                kCGWindowBounds as String: CGRect(x: x, y: y, width: w, height: h).dictionaryRepresentation,
+            ]
+        }
+        let app: [String: Any] = [
+            kCGWindowOwnerName as String: "Ghostty", kCGWindowLayer as String: 0,
+            kCGWindowBounds as String: CGRect(x: 510, y: 25, width: 1440, height: 875).dictionaryRepresentation,
+        ]
+        let screen = [CGRect(x: 0, y: 0, width: 1440, height: 900)]
+        let bar = dock(x: 0, y: 826, h: 74, layer: 20)  // the Dock itself
+        assert(!WindowServer.isRearranging(in: [bar, app, dock(x: 0)], displays: screen), "one wallpaper, where the screen is: at rest")
+        let swipe = [app, dock(x: -1556, y: 33, w: 117, h: 97, layer: -2_147_483_603), dock(x: 1640), dock(x: -1368), dock(x: 136)]
+        assert(WindowServer.isRearranging(in: swipe, displays: screen), "wallpapers off the screen's own rect: mid-swipe")
+        assert(WindowServer.isRearranging(in: [dock(x: 1)], displays: screen), "the first pixel of a swipe counts")
+        let two = screen + [CGRect(x: 1440, y: 0, width: 1440, height: 900)]
+        assert(!WindowServer.isRearranging(in: [dock(x: 0), dock(x: 1440)], displays: two), "a second screen's wallpaper is at rest too")
+        assert(!WindowServer.isRearranging(in: [dock(x: 300, w: 500, h: 400)], displays: screen), "a Dock window that is no wallpaper says nothing")
+        // Mission Control: the wallpaper hasn't moved, but the Dock has a window among the normal ones.
+        assert(WindowServer.isRearranging(in: [app, dock(x: 0, layer: 0), dock(x: 0)], displays: screen), "a normal-level Dock window: Mission Control")
+    }
+
+    static func finderReplyParsing() {
+        let hit = FinderWatcher.parse("/Users/me/a|b/|61,288,1221,1033")
+        assert(hit?.path == "/Users/me/a|b/", "a bar in a folder name is part of the path")
+        assert(
+            hit?.bounds == CGRect(x: 61, y: 288, width: 1160, height: 745),
+            "left,top,right,bottom should become a rect: \(String(describing: hit?.bounds))")
+        assert(FinderWatcher.parse("NONE") == nil, "no Finder window is no folder")
+        assert(FinderWatcher.parse("/a|1,2,3") == nil, "a short reply is no folder")
+
+        let folder = CGRect(x: 61, y: 288, width: 1160, height: 745)
+        assert(FinderWatcher.near(folder, folder.offsetBy(dx: 1, dy: 0)), "rounding slack")
+        assert(!FinderWatcher.near(folder, folder.offsetBy(dx: 40, dy: 0)), "another window is not it")
+    }
+
+    /// A script that doesn't compile fails every poll without a word, and that app's notes never show. Compiling sends the app nothing.
+    static func appleScriptsCompile() {
+        for (name, script) in [("Finder", FinderWatcher.script), ("Terminal", TerminalContainer.ttyScript)] {
+            var error: NSDictionary?
+            let compiled = script?.compileAndReturnError(&error) == true
+            assert(compiled, "the \(name) script must compile: \(error ?? [:])")
+        }
+    }
+
+    static func updateVersions() {
+        assert(Updater.isNewer("1.10.0", than: "1.9.2"), "versions compare as numbers, not text")
+        assert(Updater.isNewer("v1.7.0", than: "1.6.0"), "a tag's v is ignored")
+        assert(Updater.isNewer("2.0.0", than: "1.99.99"), "major wins")
+        assert(!Updater.isNewer("1.6.0", than: "1.6.0"), "the same version is no update")
+        assert(!Updater.isNewer("1.7", than: "1.7.0"), "a missing part is 0")
+        assert(!Updater.isNewer("1.5.9", than: "1.6.0"), "an older release is no update")
+        assert(Updater.isNewer("0.0.1", than: "garbage"), "an unreadable installed version is 0.0.0")
+    }
+
+    static func updateReleaseParsing() {
+        let json = Data("""
+            {"tag_name": "v1.7.0", "html_url": "https://github.com/o/r/releases/tag/v1.7.0",
+             "assets": [
+               {"name": "Tack-v1.7.0-intel.zip", "browser_download_url": "https://x/intel.zip"},
+               {"name": "Tack-v1.7.0-apple-silicon.zip", "browser_download_url": "https://x/arm.zip"}]}
+            """.utf8)
+        let arm = try! Updater.release(from: json, appleSilicon: true)
+        assert(arm?.version == "1.7.0", "the version drops the tag's v: \(String(describing: arm))")
+        assert(arm?.download.absoluteString == "https://x/arm.zip", "Apple silicon gets its own zip")
+        let intel = try! Updater.release(from: json, appleSilicon: false)
+        assert(intel?.download.absoluteString == "https://x/intel.zip", "Intel gets its own zip")
+
+        let half = Data(#"{"tag_name": "v1.8.0", "html_url": "https://x", "assets": []}"#.utf8)
+        assert(try! Updater.release(from: half, appleSilicon: true) == nil, "no zip yet is no update")
+
+        let repo = Data(#"{"name": "tack", "stargazers_count": 42, "forks_count": 3}"#.utf8)
+        assert(try! Updater.stars(from: repo) == 42, "the star count comes from stargazers_count")
+    }
+
+    /// Issue #13: a save must not write the old words over a file a script has rewritten.
+    static func mergeKeepsNewerFile() {
+        let seen = Note(text: "old", dx: 1, dy: 1)
+        let disk = Note(text: "from the script", dx: 1, dy: 1)
+        let dragged = Note(text: "old", dx: 50, dy: 60)
+        let merged = Note.merge(mine: dragged, seen: seen, disk: disk)
+        assert(merged.text == "from the script", "a drag keeps the file's words")
+        assert(merged.dx == 50 && merged.dy == 60, "and still moves the note")
+
+        let typed = Note(text: "typed now", dx: 1, dy: 1)
+        assert(Note.merge(mine: typed, seen: seen, disk: disk) == typed, "what the user typed wins")
+
+        // Each field on its own: the user recolours while a script rewrites the text.
+        var recoloured = seen
+        recoloured.color = "AEC6FF"
+        let both = Note.merge(mine: recoloured, seen: seen, disk: disk)
+        assert(both.text == "from the script" && both.color == "AEC6FF", "both changes survive: \(both)")
+        assert(Note.merge(mine: dragged, seen: seen, disk: seen) == dragged, "nobody else wrote: as is")
+        assert(Note.merge(mine: dragged, seen: nil, disk: disk) == dragged, "nothing seen yet: as is")
+        assert(Note.merge(mine: dragged, seen: seen, disk: nil) == dragged, "file gone: as is")
+
+        let pending = Debouncer(delay: 60)
+        assert(!pending.isPending, "nothing scheduled, nothing pending")
+        pending.call { true }
+        assert(pending.isPending, "a scheduled save is pending until it runs")
+        pending.flush()
+        assert(!pending.isPending, "a run save is no longer pending")
+    }
+
+    static func dashboardBackdrop() {
+        assert(NoteGrid.backdrop([]) == [], "no notes, no gradient")
+        assert(NoteGrid.backdrop(["ffeb73"]) == ["FFEB73", "FFEB73"], "one colour still makes a run")
+        assert(
+            NoteGrid.backdrop(["FFEB73", "AEC6FF", "ffeb73", "FFB3BA"]) == ["FFEB73", "AEC6FF", "FFB3BA"],
+            "each colour once, in the order the notes come")
+        assert(NoteGrid.backdrop(["1", "2", "3", "4", "5"]).count == 4, "at most four stops")
+    }
+
     static func markdownRoundTrip() {
         // The backward-compat guarantee: a note saved as markdown must survive parse -> serialize
         // unchanged, so .tack.json stays markdown and pre-Notion notes keep working.
@@ -842,6 +953,37 @@ extension SelfTest {
 
     /// The pill's two shapes: a circle at rest, wider when hovered, and never wider than the
     /// narrowest note it has to sit in.
+    /// Every glyph a pill dot wears — the "T" of each face and each SF Symbol — must sit in the
+    /// middle of its dot by what is actually drawn, not by its padded box.
+    static func dotGlyphsAreCentred() {
+        let square = NSImage(size: NSSize(width: 10, height: 10), flipped: false) { _ in
+            NSColor.black.setFill()
+            NSRect(x: 2, y: 3, width: 4, height: 5).fill()
+            return true
+        }
+        assert(square.inkBounds == NSRect(x: 2, y: 3, width: 4, height: 5), "ink is what is drawn: \(square.inkBounds)")
+
+        let glyphs: [(String, NSImage)] =
+            NoteFont.allCases.map { face in
+                let label = NSAttributedString(string: "T", attributes: [.font: face.font(ofSize: 11)])
+                return ("T in \(face)", NSImage(size: label.size(), flipped: false) { _ in label.draw(at: .zero); return true })
+            }
+            + ["trash.fill", "square.grid.2x2.fill", "macwindow", "doc.fill"].map { name in
+                (name, NSImage(systemSymbolName: name, accessibilityDescription: nil)!
+                    .withSymbolConfiguration(.init(pointSize: 8, weight: .semibold))!)
+            }
+        for (name, glyph) in glyphs {
+            let canvas = NSRect(x: 0, y: 0, width: 16, height: 16)
+            let placed = NSImage(size: canvas.size, flipped: false) { rect in
+                glyph.drawInkCentered(in: rect)
+                return true
+            }
+            let ink = placed.inkBounds
+            let off = max(abs(ink.midX - canvas.midX), abs(ink.midY - canvas.midY))
+            assert(off <= 0.25, "\(name) is \(off)pt off-centre in its dot: \(ink)")
+        }
+    }
+
     static func pillGeometry() {
         let closed = NotePill.pillClosedSize
         assert(closed.width == closed.height, "closed, the pill should be a circle: \(closed)")

@@ -6,7 +6,6 @@ import AppKit
 final class DragGlassView: NSVisualEffectView {
     var onDrag: ((NSPoint) -> Void)?  // proposed window origin, Cocoa coords
     var onPress: (() -> Void)?  // a click anywhere on the card: dismisses an open picker
-    var contextMenu: (() -> NSMenu?)?  // right-click on the card: palette editing and pin level
     var onTopDoubleClick: (() -> Void)?  // double-click in the top band: fold/unfold, as in Stickies
     /// How far down from the top edge a double-click counts as "on the title bar".
     var topBand: CGFloat = 0
@@ -37,6 +36,4 @@ final class DragGlassView: NSVisualEffectView {
     }
 
     override func mouseUp(with event: NSEvent) { grab = nil }
-
-    override func menu(for event: NSEvent) -> NSMenu? { contextMenu?() }
 }

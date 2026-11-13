@@ -1,10 +1,20 @@
+import AppKit
+
 /// A Finder folder. The note lives in a hidden .tack.json inside the folder itself, which is
 /// why it travels with the folder when you move or copy it — and why it can't be promoted.
 final class FinderContainer: Container {
     static let bundleID = "com.apple.finder"
     let folder: String
+    /// The window-server number of this folder's window, when it could be told apart — see
+    /// FinderWatcher.windowNumber. nil follows the frontmost Finder window.
+    /// shortcut: the same folder open in two windows keeps its note on the one focused first
+    /// (the focus key is the folder, so the poll sees no change); key on the window if it matters.
+    private let window: Int?
 
-    init(folder: String) { self.folder = folder }
+    init(folder: String, window: Int? = nil) {
+        self.folder = folder
+        self.window = window
+    }
 
     override var path: [String] { [Self.bundleID, folder] }
     override var minLevel: Int { 1 }
@@ -18,7 +28,11 @@ final class FinderContainer: Container {
     /// Polled at 60fps to glue the note to the window. CGWindowList gives bounds and
     /// occluders in the same pass.
     override func frame() -> Frame? {
-        guard let info = FinderWatcher.frontFinderWindow() else { return nil }
+        let inFront = NSWorkspace.shared.frontmostApplication?.bundleIdentifier == Self.bundleID
+        guard
+            let info = FinderWatcher.frontFinderWindow(
+                number: window, orFrontmost: window == nil || inFront)
+        else { return nil }
         return Frame(bounds: info.bounds, covering: info.coveringRects)
     }
 }

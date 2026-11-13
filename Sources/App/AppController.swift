@@ -1,22 +1,35 @@
 import AppKit
 
-/// Owns the app's lifecycle and the two loops that decide which note is on screen
-/// and where. Menu construction lives in AppMenus.swift.
-/// One note on screen: its window, the surface it belongs to, and the level it's pinned at.
-private final class ShownNote {
+/// One note on screen: its window, the level it is pinned at, and what Tack last knew of it.
+final class ShownNote {
     let window: NoteWindow
-    let container: Container
-    /// A reference cell, shared with the note's save closure — see LevelBox.
-    let level: LevelBox
+    let level: LevelBox  // see LevelBox
+    /// The note as Tack last read or wrote it — what a save compares the file against, so it
+    /// never writes over a newer one (see Note.merge).
+    var seen: Note?
 
-    init(window: NoteWindow, container: Container, level: LevelBox) {
+    init(window: NoteWindow, level: LevelBox, seen: Note?) {
         self.window = window
-        self.container = container
         self.level = level
+        self.seen = seen
     }
+}
 
-    /// Where this note is stored right now. Computed, not kept: a pin change moves it.
-    var key: String { container.key(at: level.value) }
+/// One app's place on screen: the surface its notes are glued to, and every note pinned there.
+/// Each app gets its own, so the notes on an app you have clicked away from stay where they are.
+final class ShownPlace {
+    /// The surface the notes follow. Replaced by a fresh one with the same focus key when the
+    /// same folder or document comes back in a second window — it carries the window to follow.
+    var container: Container
+    var notes: [ShownNote] = []
+    var lastBounds: CGRect?  // where the tracked window was at the last sample
+    var stillFrames = 0  // samples since it last moved — see samples(stillFrames:)
+    var missing = 0  // samples in a row its window was nowhere on a desktop in view — see trackNotes
+
+    init(container: Container) { self.container = container }
+
+    /// Where `note` is stored right now. Computed, not kept: a pin change moves it.
+    func key(of note: ShownNote) -> String { container.key(at: note.level.value) }
 }
 
 /// Owns the app's lifecycle and the two loops that decide which notes are on screen
@@ -25,38 +38,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Every floating note window built so far. Reused rather than thrown away, so flipping
     /// between surfaces doesn't build and tear down windows on every poll.
     private var pool: [NoteWindow] = []
-    /// The notes on screen now, all belonging to `current`.
-    private var shown: [ShownNote] = []
+    /// The places with notes on screen, one per app, keyed by `Container.app`.
+    private var places: [String: ShownPlace] = [:]
     private var statusItem: NSStatusItem?
-    /// The Tack window — every note at once. Nil until it is first opened, so a session that
-    /// never opens it never builds a window.
-    private(set) var grid: NoteGrid?
     private var pollTimer: Timer?  // slow: which surface is focused (~0.4s)
-    private var trackLink: CADisplayLink? {  // vsync glue: the shown notes follow their window
+    private var trackLink: CADisplayLink? {  // vsync glue: each shown note follows its window
         didSet { oldValue?.invalidate() }  // an outlived link would keep firing
     }
     private var lastPersistenceError: String?
+    private var pollWhenSettled = false  // a poll is already waiting for the screen to settle — see pollTarget
 
+    /// The focused surface, as of the last poll.
     var current: Container?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = makeStatusItem()
         installEditMenu()
         AXWindows.promptForPermission()  // needed to bind notes to non-Finder app windows
+        AXWindows.limitWaiting()
 
         pollTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in
             self?.pollTarget()
+            self?.syncFromDisk()
+        }
+        pollTimer?.tolerance = 0.1  // lets macOS line this wake-up up with others
+        // No updater in this build: the author's releases are the stock app, and installing one
+        // over this local build would drop its own features and its signing (and with it the
+        // Accessibility grant). Updates come from merging upstream and running bundle.sh.
+
+        // A note outlives its app's focus now, so nothing else would ever take it down when the
+        // app quits: its window just vanishes from the list and the note would wait for it forever.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] notification in
+            let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            if let id = app?.bundleIdentifier { self?.hidePlace(app: id) }
+        }
+
+        // The tracking link belongs to one screen. Unplug that screen and it may never fire again, and nothing else would start a new one: `startTracking` only does when there is none.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self, trackLink != nil else { return }
+            trackLink = nil
+            startTracking()
         }
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        flushAll() && (grid?.flush() ?? true) ? .terminateNow : .terminateCancel
+        // Everything is flushed before anything is judged: `&&` would skip the rest after a failure.
+        let notesSaved = flushAll()
+        let gridSaved = grid.flush()
+        if notesSaved && gridSaved { return .terminateNow }
+        // Refusing outright made Quit a dead button for as long as the save kept failing.
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Some edits could not be saved"
+        alert.informativeText = "Quitting now loses them."
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Quit Anyway")
+        return alert.runModal() == .alertSecondButtonReturn ? .terminateNow : .terminateCancel
     }
 
     /// Every window's pending edit, written now. Every window is flushed even after one fails: a
     /// note that can't save must not cost the others theirs.
     @discardableResult func flushAll() -> Bool {
-        pool.map { $0.flushPendingSave() }.allSatisfy { $0 }
+        (pool + [looseNote]).map { $0.flushPendingSave() }.allSatisfy { $0 }
     }
 
     // MARK: - Target resolution
@@ -71,10 +118,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Loops
 
+    /// Decides what the *focused* app shows. Only that app's notes are ever changed here: the
+    /// notes of every other app stay up, following their own windows.
     private func pollTarget() {
+        // A surface resolved mid-switch between desktops would be placed where the slide has its window. Looked at again every tenth of a second until the screen has settled, so a note that needs this poll to come up doesn't also wait out the 0.4s timer.
+        if WindowServer.isRearranging() {
+            guard !pollWhenSettled else { return }
+            pollWhenSettled = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                self?.pollWhenSettled = false
+                self?.pollTarget()
+            }
+            return
+        }
+        // The note that is the dashboard keeps its app's place until it turns back into a note:
+        // re-showing or hiding that place meanwhile would yank the dashboard away.
+        if let host = dashboardNote,
+            let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+            places[front]?.notes.contains(where: { $0.window === host }) == true
+        {
+            return
+        }
         guard let container = resolve() else {
-            hideAll()
+            // Nothing to pin to in front (no window, no folder): that app's notes go.
+            if let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier {
+                hidePlace(app: front)
+            }
             current = nil
+            return
+        }
+        // Back on a surface whose notes never left the screen: nothing to load or re-show. The
+        // fresh container replaces the old one, though — it carries the window to follow, which
+        // differs when the same folder or document is open in a second window.
+        if let place = places[container.app], place.container.focusKey == container.focusKey {
+            place.container = container
+            current = container
             return
         }
         // Container is a class, so compare its stable focus key rather than object identity.
@@ -85,7 +163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // next poll retries, rather than stranding the note hidden until the user focuses away.
         guard let f = container.frame() else {
             DebugLog.note("poll: \(container.path.first ?? "?") has no on-screen window to pin to")
-            hideAll()
+            hidePlace(app: container.app)
             current = nil
             return
         }
@@ -98,135 +176,185 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             current = container
             lastPersistenceError = nil
         } catch {
-            hideAll()
+            hidePlace(app: container.app)
             reportPersistenceError(error)
         }
     }
 
-    @objc private func trackTarget() {
-        guard let f = current?.frame() else { return }
-        shown.forEach { apply(f, to: $0.window) }
+    @objc private func trackNotes() {
+        var showing = false
+        // One read of the window list for the whole frame — see WindowServer.sharingOneRead.
+        WindowServer.sharingOneRead {
+            for place in places.values where !place.notes.isEmpty {
+                showing = true
+                place.stillFrames += 1
+                guard Self.samples(stillFrames: place.stillFrames) else { continue }
+                // Mid-switch between desktops, or in Mission Control, every window is reported where the animation has it. The notes are left alone then, riding their own desktop, which is all they have to do — see WindowServer.isRearranging.
+                if WindowServer.isRearranging() { continue }
+                // No window to follow — minimised, hidden, on another Space. The notes wait out of
+                // sight and come back with the window; only a new focus or a quit takes them down.
+                guard let f = place.container.frame() else {
+                    // On another desktop there is nothing to do: the notes are out of sight there already, and left up they ride back in with their window instead of popping in once the switch is over. Only on a desktop in view are they taken down, and only at the second sample in a row: AppKit learns of a desktop switch a moment after the window list shows it.
+                    let inView = place.notes.contains { $0.window.isOnActiveSpace }
+                    place.missing = inView ? place.missing + 1 : 0
+                    if place.missing >= 2 { place.notes.forEach { $0.window.setOccluded(true) } }
+                    continue
+                }
+                place.missing = 0
+                if f.bounds != place.lastBounds {
+                    place.lastBounds = f.bounds
+                    place.stillFrames = 0
+                }
+                place.notes.forEach { apply(f, to: $0.window) }
+            }
+        }
+        if !showing { trackLink = nil }  // nothing left to follow; show starts it again
     }
 
-    /// The one place a note follows its window. Containers that can't be covered report no
-    /// occluders, so the same two lines serve Finder and app windows alike. Each note is tested
-    /// on its own: a window covering one corner hides only the note sitting there.
-    private func apply(_ f: Frame, to window: NoteWindow) {
-        window.updateWindow(bounds: f.bounds)
-        window.setOccluded(f.covering.contains { $0.intersects(window.screenRectTopLeft()) })
+    /// Whether this frame reads the window list. Every frame while the window is moving; once it
+    /// has sat still for 30, one frame in six — the read walks every window on screen, and a
+    /// window at rest was paying for it at the full refresh rate.
+    /// shortcut: the first frame of a new drag can be up to five frames late (~40ms at 120Hz);
+    /// wake on AXWindowMoved instead if that ever shows.
+    static func samples(stillFrames: Int) -> Bool { stillFrames < 30 || stillFrames % 6 == 0 }
+
+    /// The one place a note follows its window, and hides while another window covers its spot
+    /// — which is what keeps the notes of an app in the background from floating over the app
+    /// in front of it. Each note is tested on its own: a window covering one corner hides only
+    /// the note sitting there.
+    private func apply(_ f: Frame, to note: NoteWindow) {
+        note.joinActiveSpace()
+        note.updateWindow(bounds: f.bounds)
+        let spot = note.screenRectTopLeft()
+        note.setOccluded(f.covering.contains { $0.intersects(spot) })
     }
 
-    /// Glue the shown notes to their window, sampled in sync with the display's own refresh — the
-    /// full rate on 120Hz ProMotion, where a fixed 60fps timer updates at half the window's rate
-    /// and visibly stutters. Polling, not AX move events, is what keeps the notes locked during a
-    /// live drag: the OS coalesces AXWindowMoved notifications, so an event-driven note trails.
+    /// Glue the shown notes to their windows, sampled in sync with the display's own refresh — a
+    /// fixed 60fps timer updates at half a 120Hz window's rate and visibly stutters. Polling, not
+    /// AX move events, is what keeps a note locked during a live drag: the OS coalesces
+    /// AXWindowMoved notifications, so an event-driven note trails.
     ///
-    /// One link drives every note. It comes from the *screen* the notes are on, not from a note's
-    /// window: a note covered by another window is ordered out, and a link tied to an ordered-out
-    /// window can stop firing — which would freeze every other note in place mid-drag. Rebuilt
-    /// whenever the set changes.
+    /// The link comes from the screen, not from a note's window: a window's link pauses while
+    /// the window is off screen, and a hidden note is exactly the one waiting to be told its
+    /// window is back.
+    /// shortcut: every note ticks at the main screen's rate, whatever display it is on; give each
+    /// note its own screen's link if a mixed-refresh setup shows a stutter.
     private func startTracking() {
-        guard let first = shown.first, let screen = first.window.screen ?? NSScreen.main
-        else { return stopTracking() }
-        let link = screen.displayLink(target: self, selector: #selector(trackTarget))
+        guard trackLink == nil, let screen = NSScreen.main ?? NSScreen.screens.first else { return }
+        let link = screen.displayLink(target: self, selector: #selector(trackNotes))
         link.add(to: .main, forMode: .common)
         trackLink = link
     }
 
     // MARK: - Show / hide
 
-    /// Replace whatever is on screen with `notes`, all on `container`.
+    /// Replace whatever `container`'s app shows with `notes`, all on `container`.
     private func present(_ notes: [(note: Note, level: Int)], frame f: Frame, container: Container) {
-        hideAll()
-        for hit in notes { show(hit.note, level: hit.level, frame: f, container: container) }
+        hidePlace(app: container.app)
+        guard !notes.isEmpty else { return }
+        let place = ShownPlace(container: container)
+        places[container.app] = place
+        for hit in notes { show(hit.note, level: hit.level, in: place, frame: f) }
         startTracking()
     }
 
-    /// Put one note on screen, in a free window from the pool or a new one. The caller restarts
-    /// tracking. Nil only if the note couldn't be shown at all.
-    @discardableResult
-    func show(_ n: Note, level: Int, frame f: Frame, container: Container) -> NoteWindow? {
-        let box = LevelBox(level)  // this note's own level cell — see LevelBox
-        let save: (Note) -> Bool = { [weak self] edited in
-            self?.persist { try container.write(edited, at: box.value) } ?? false
-        }
-        // A window still holding an edit it can't save refuses to show (its show() flushes
-        // first); it keeps that edit, and the note goes to the next free window instead.
-        let busy = Set(shown.map { ObjectIdentifier($0.window) })
-        let window =
-            pool.first { !busy.contains(ObjectIdentifier($0)) && $0.show(note: n, bounds: f.bounds, save: save) }
-            ?? makeWindow(showing: n, bounds: f.bounds, save: save)
-        guard let window else { return nil }
+    /// Windows that can't be handed a new note: one showing a note, or one that is the dashboard
+    /// — until it has finished shrinking back, which outlasts `dashboardNote`.
+    private var busyWindows: Set<ObjectIdentifier> {
+        let showing = places.values.flatMap(\.notes).map(\.window)
+        return Set((showing + pool.filter(\.isExpanded)).map(ObjectIdentifier.init))
+    }
 
-        shown.append(ShownNote(window: window, container: container, level: box))
+    /// Put one note on screen in `place`, in a free window from the pool or a new one. The
+    /// caller starts tracking.
+    @discardableResult
+    private func show(_ n: Note, level: Int, in place: ShownPlace, frame f: Frame) -> NoteWindow {
+        let container = place.container  // a later replacement has the same keys: same focus key
+        let box = LevelBox(level)  // this note's own level cell — see LevelBox
+        let busy = busyWindows
+        let window = pool.first { !busy.contains(ObjectIdentifier($0)) } ?? makeWindow()
+        let shown = ShownNote(window: window, level: box, seen: n)
+        place.notes.append(shown)
+        place.lastBounds = nil
+        place.stillFrames = 0  // a note just shown tracks at full rate from its first frame
+
+        window.show(note: n, bounds: f.bounds) { [weak self, weak shown] edited in
+            guard let self else { return false }
+            return persist {
+                // Never over a newer file: a script may have rewritten it since — see Note.merge.
+                let disk = try container.notes(at: box.value).first { $0.id == edited.id }
+                let toWrite = Note.merge(mine: edited, seen: shown?.seen, disk: disk)
+                try container.write(toWrite, at: box.value)
+                shown?.seen = toWrite
+                if toWrite != edited { self.cascade(key: container.key(at: box.value), note: toWrite) }
+            }
+        }
         // Only an open dashboard cares, and only it knows this note by its storage key.
         window.onLiveEdit = { [weak self] edited in
-            self?.grid?.update(key: container.key(at: box.value), note: edited)
+            self?.grid.update(key: container.key(at: box.value), note: edited)
         }
         window.onDelete = { [weak self, weak window] in
             guard let self, let window else { return }
             forget(window)
         }
-        let choices = (container.minLevel...container.finestLevel).map {
-            (level: $0, label: LevelName.label(level: $0, of: container.path.count))
+        window.onOpenAll = { [weak self, weak window] in
+            guard let self, let window else { return }
+            openDashboard(from: window)
         }
-        window.setPinLevels(choices, current: level) { [weak self, weak window] newLevel in
+        let choices = container.pinLevels.map {
+            (
+                level: $0, label: LevelName.label(level: $0, of: container.path.count),
+                symbol: LevelName.symbol(level: $0, of: container.path.count)
+            )
+        }
+        window.setPinLevels(choices, current: level) { [weak self, weak window, weak shown] newLevel in
             guard let self, let window else { return false }
             let moved = self.persist {
                 // A note never typed in isn't on disk: there's nothing to move, only the level
                 // its first save will land at.
                 guard let id = window.noteID, let hit = try container.find(id: id) else { return }
-                window.adoptID(try container.move(hit.note, from: hit.level, to: newLevel).id)
+                let note = try container.move(hit.note, from: hit.level, to: newLevel)
+                window.adoptID(note.id)
+                shown?.seen = note
             }
             guard moved else { return false }
             box.value = newLevel  // redirect this note's later edits — same cell the save closure reads
+            // The dashboard knows a note by its key, and the key just changed: left alone, its
+            // cell would write the note back under the old one on the next edit there.
+            self.grid.reload()
             return true
         }
         apply(f, to: window)
         return window
     }
 
-    private func makeWindow(showing n: Note, bounds: CGRect, save: @escaping (Note) -> Bool)
-        -> NoteWindow?
-    {
+    private func makeWindow() -> NoteWindow {
         let window = NoteWindow()
         pool.append(window)
-        return window.show(note: n, bounds: bounds, save: save) ? window : nil
-    }
-
-    /// A note left the screen for good (deleted): stop tracking it, and rebuild the shared
-    /// display link if it was the one the link came from.
-    private func forget(_ window: NoteWindow) {
-        shown.removeAll { $0.window === window }
-        startTracking()
-    }
-
-    private func hideAll() {
-        shown.forEach { $0.window.hide() }
-        shown = []
-        stopTracking()
+        return window
     }
 
     /// A new, empty note on the focused surface, placed so it doesn't sit exactly on top of one
     /// that's already there. It reaches disk with its first keystroke, like any note.
     func addNewNote(on container: Container, frame f: Frame) -> NoteWindow? {
-        if container.focusKey != current?.focusKey {  // bring its existing notes up alongside
-            flushAll()
+        if places[container.app]?.container.focusKey != container.focusKey {
+            flushAll()  // bring its existing notes up alongside
             do {
                 present(try container.loadAll(), frame: f, container: container)
             } catch {
                 reportPersistenceError(error)
                 return nil
             }
-            current = container
         }
+        current = container
+        let place = places[container.app] ?? ShownPlace(container: container)
+        places[container.app] = place
         let size = NotePreferences.shared.defaultSize
         let spot = Coord.cascade(
             from: Coord.center(note: size, window: f.bounds.size),
-            avoiding: shown.map(\.window.offset), note: size, window: f.bounds.size)
+            avoiding: place.notes.map(\.window.offset), note: size, window: f.bounds.size)
         let window = show(
-            Note.new(dx: spot.dx, dy: spot.dy), level: container.finestLevel, frame: f,
-            container: container)  // finest available, promote later
+            Note.new(dx: spot.dx, dy: spot.dy), level: container.finestLevel, in: place, frame: f)  // finest available, promote later
         startTracking()
         return window
     }
@@ -243,22 +371,175 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Builds the Tack window the first time it is asked for, and shows it.
-    func openGrid() {
-        let window = grid ?? NoteGrid { [weak self] error in self?.reportPersistenceError(error) }
-        window.onLiveEdit = { [weak self] key, edited in
-            guard let self,
-                let entry = shown.first(where: { $0.key == key && $0.window.noteID == edited.id })
-            else { return }  // not on screen: nothing to keep in step
-            if edited.isDeletion {
-                entry.window.hideDiscardingPendingSave()
-                forget(entry.window)
-            } else {
-                entry.window.applyLive(edited)
+    /// Every note on screen, with the place it belongs to.
+    private var allShown: [(place: ShownPlace, note: ShownNote)] {
+        places.values.flatMap { place in place.notes.map { (place, $0) } }
+    }
+
+    /// The note on screen stored at `key` under `id`, if any.
+    private func shown(key: String, id: String?) -> (place: ShownPlace, note: ShownNote)? {
+        allShown.first { $0.place.key(of: $0.note) == key && $0.note.window.noteID == id }
+    }
+
+    // MARK: - Changes from outside
+
+    /// Modification dates of the note files on screen, as last looked at.
+    private var fileDates: [URL: Date?] = [:]
+
+    /// Every poll: has a file behind a note on screen — a floating note, or a card in an open
+    /// dashboard — changed since the last look? Then those notes are read again and shown.
+    /// A date per file, not a watcher: one stat per file per poll is nothing, it survives the
+    /// write-to-a-temp-file-and-rename most tools do, and Finder notes live in many folders.
+    private func syncFromDisk() {
+        var onScreen = allShown.map { $0.place.key(of: $0.note) }
+        if dashboardNote != nil { onScreen += grid.keys }
+        var keysByFile: [URL: Set<String>] = [:]
+        for key in onScreen {
+            if let url = StoredNote.fileURL(of: key) { keysByFile[url, default: []].insert(key) }
+        }
+        // The dashboard also gains notes a script adds to the central store.
+        if dashboardNote != nil, let store = AppNotes.storeURL, keysByFile[store] == nil {
+            keysByFile[store] = []
+        }
+
+        for (url, keys) in keysByFile {
+            let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate
+            let known = fileDates[url]
+            fileDates[url] = date
+            guard let known, known != date else { continue }  // first look only records the date
+            do {
+                var changed = keys
+                if url == AppNotes.storeURL, dashboardNote != nil {
+                    changed.formUnion(try AppNotes.all().keys)
+                }
+                for key in changed { adoptFromDisk(key: key, notes: try StoredNote.load(key: key)) }
+            } catch {
+                // Unreadable is not deleted: a file caught half-written by a script or a sync must not take its notes off the screen. The date is put back so the next poll reads it again.
+                fileDates[url] = known
             }
         }
-        grid = window
-        window.open()
+    }
+
+    /// The notes at `key` changed on disk: each floating note showing one of them adopts its new
+    /// version unless the user is mid-edit there, and goes if it was deleted there. The
+    /// dashboard follows.
+    private func adoptFromDisk(key: String, notes: [Note]) {
+        for (place, shown) in allShown where place.key(of: shown) == key {
+            guard !shown.window.hasPendingEdit else { continue }
+            if let note = notes.first(where: { $0.id == shown.window.noteID }) {
+                shown.seen = note
+                if shown.window.currentNote != note { shown.window.applyLive(note) }
+            } else if Self.deletedElsewhere(seen: shown.seen) {
+                shown.seen = nil
+                shown.window.hide()
+                forget(shown.window)
+            }
+        }
+        if dashboardNote != nil { grid.adoptFromDisk(key: key, notes: notes) }
+    }
+
+    /// A note missing from its file was deleted by somebody else only if Tack last knew it with words in it: an empty note is never stored (`Note.isDeletion`), so one dragged before being typed in, or just emptied, is missing because Tack saved it so, and hiding it would pull it from under the caret.
+    static func deletedElsewhere(seen: Note?) -> Bool { seen?.isDeletion != true }
+
+    /// Put `note` on every view of it — the floating note and the dashboard's card — because a
+    /// save kept words from the file over the ones on screen.
+    private func cascade(key: String, note: Note) {
+        shown(key: key, id: note.id)?.note.window.applyLive(note)
+        if dashboardNote != nil { grid.update(key: key, note: note) }
+    }
+
+    // MARK: - Dashboard
+
+    /// Every note at once. Built the first time the dashboard opens.
+    private(set) lazy var grid: NoteGrid = {
+        let grid = NoteGrid { [weak self] error in self?.reportPersistenceError(error) }
+        grid.onLiveEdit = { [weak self] key, edited in
+            // A note that isn't on screen has nothing to keep in step.
+            guard let self, let hit = shown(key: key, id: edited.id) else { return }
+            if edited.isDeletion {
+                hit.note.window.hideDiscardingPendingSave()
+                forget(hit.note.window)
+            } else {
+                hit.note.window.applyLive(edited)
+            }
+        }
+        // The dashboard floats over everything: left up, it would hide the app it just brought
+        // forward. It turns back into its note, and the poll shows that app's notes as usual.
+        grid.onReveal = { [weak self] in self?.closeDashboard() }
+        grid.onChange = { [weak self] in
+            guard let self, let host = dashboardNote else { return }
+            host.setDashboardColors(self.grid.colors)
+        }
+        return grid
+    }()
+
+    /// The note that is the dashboard right now, if one is.
+    private weak var dashboardNote: NoteWindow?
+    /// The dashboard's other page, built the first time it is asked for.
+    private lazy var settingsPage = SettingsView()
+    private var onSettingsPage = false
+
+    /// Becomes the dashboard when it is opened from the menu bar with no note on screen to grow.
+    private lazy var looseNote = NoteWindow()
+
+    /// `note` becomes the dashboard — or, from the menu bar, a note of the app in front, or a
+    /// bare card when that app shows none. A dashboard already up just comes forward.
+    func openDashboard(from note: NoteWindow?) {
+        if let current = dashboardNote, current.isExpanded {
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        flushAll()  // the grid is about to read disk
+        let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
+        let host = note ?? places[front]?.notes.first?.window ?? looseNote
+        grid.reload()
+        host.onCollapse = { [weak self] in self?.closeDashboard() }
+        host.onDashboardPress = { [weak self] in self?.grid.unfocus() }
+        host.onSettings = { [weak self, weak host] in
+            guard let self, let host else { return }
+            onSettingsPage.toggle()
+            host.showPage(onSettingsPage ? settingsPage : grid.view, settings: onSettingsPage)
+        }
+        onSettingsPage = false
+        host.expand(showing: grid.view, to: dashboardFrame(near: host.frame), color: Self.dashboardColor)
+        dashboardNote = host
+        host.setDashboardColors(grid.colors)
+    }
+
+    func closeDashboard() {
+        guard let host = dashboardNote else { return }
+        grid.flush()
+        UserDefaults.standard.set(NSStringFromRect(host.frame), forKey: Self.dashboardFrameKey)
+        dashboardNote = nil
+        host.collapse()
+    }
+
+    private static let dashboardFrameKey = "dashboardFrame"
+
+    /// Where the dashboard opens: where it was last left, while that is still on a screen;
+    /// otherwise 760×560 in the middle of the screen `near` is on.
+    private func dashboardFrame(near: NSRect) -> NSRect {
+        if let saved = UserDefaults.standard.string(forKey: Self.dashboardFrameKey) {
+            let frame = NSRectFromString(saved)
+            if NSScreen.screens.contains(where: { $0.visibleFrame.intersects(frame) }) { return frame }
+        }
+        let screen = NSScreen.screens.first { $0.frame.intersects(near) } ?? NSScreen.main
+        let area = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let size = NSSize(width: min(760, area.width - 40), height: min(560, area.height - 40))
+        return NSRect(
+            x: area.midX - size.width / 2, y: area.midY - size.height / 2,
+            width: size.width, height: size.height)
+    }
+
+    /// The dashboard's background, solid — what a growing note washes to. Read in the light
+    /// appearance the cards are always drawn in, so the two never clash.
+    private static var dashboardColor: NSColor {
+        var color = NSColor.windowBackgroundColor
+        NSAppearance(named: .aqua)?.performAsCurrentDrawingAppearance {
+            color = color.usingColorSpace(.sRGB) ?? color
+        }
+        return color
     }
 
     func reportPersistenceError(_ error: Error) {
@@ -273,7 +554,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.runModal()
     }
 
-    private func stopTracking() {
-        trackLink = nil  // didSet invalidates it on the way out
+    /// Take down every note `app` is showing. Every other app's notes are left alone.
+    private func hidePlace(app: String) {
+        guard let place = places.removeValue(forKey: app) else { return }
+        place.notes.forEach { $0.window.hide() }
+    }
+
+    /// A note left the screen for good (deleted): stop tracking it. Its window goes back to the
+    /// pool; a place left with no notes goes too.
+    private func forget(_ window: NoteWindow) {
+        for (app, place) in places {
+            place.notes.removeAll { $0.window === window }
+            if place.notes.isEmpty { places[app] = nil }
+        }
     }
 }

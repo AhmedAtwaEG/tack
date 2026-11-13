@@ -18,6 +18,10 @@ class Container {
     /// Identity, coarse → fine: [app, window, tab]. Only as deep as the app actually resolves.
     var path: [String] { [] }
 
+    /// The app this surface belongs to — the first path component, a bundle ID. One note shows
+    /// per app at a time, so this is what the notes on screen are told apart by.
+    var app: String { path.first ?? "" }
+
     /// The coarsest level a note may attach at. Finder overrides this: its notes live in a
     /// .tack.json inside the folder, so "a note on all of Finder" has no file to live in.
     var minLevel: Int { 0 }
@@ -27,6 +31,12 @@ class Container {
     /// A stable persistence identity for the finest scope when its display hierarchy contains
     /// mutable components. Browser and Terminal tabs provide this; ordinary containers do not.
     var finestKey: String? { nil }
+
+    /// The levels the pin menu offers. A surface with a stable tab key (a browser, Terminal)
+    /// knows its *window* only by a title that changes with every tab switch or command, so a
+    /// note pinned there would vanish at once — the window level is left out for those.
+    /// Notes already saved at it still load; this only stops new ones.
+    var pinLevels: [Int] { (minLevel...finestLevel).filter { $0 != 1 || finestKey == nil } }
 
     /// The note key for a prefix of `path`. Pure, and the format is a compatibility
     /// guarantee: at the finest level of a 2-part path it reproduces the pre-Container
@@ -104,8 +114,9 @@ extension Container {
     /// Which container the frontmost app gets. The one place per-app rules live.
     static func resolve(front: NSRunningApplication) -> Container? {
         if front.bundleIdentifier == FinderContainer.bundleID {
-            guard let folder = FinderWatcher.frontFolderPath() else { return nil }
-            return FinderContainer(folder: folder)
+            guard let front = FinderWatcher.frontFolder() else { return nil }
+            return FinderContainer(
+                folder: front.path, window: FinderWatcher.windowNumber(near: front.bounds))
         }
         if let id = front.bundleIdentifier {
             if BrowserContainer.bundleIDs.contains(id) { return BrowserContainer(app: front) }
@@ -123,6 +134,13 @@ enum LevelName {
         if level == 0 { return "Pin to this app" }
         if count > 2 && level == count - 1 { return "Pin to this tab" }
         return "Pin to this window"
+    }
+
+    /// The SF Symbol the pill's level picker wears for the same level — same rule as `label`.
+    static func symbol(level: Int, of count: Int) -> String {
+        if level == 0 { return "square.grid.2x2.fill" }
+        if count > 2 && level == count - 1 { return "doc.fill" }
+        return "macwindow"
     }
 }
 
@@ -187,6 +205,21 @@ extension Container {
             return .url(url)
         }
         return .app
+    }
+
+    /// What the note's "open where it lives" dot wears: the folder's own icon for a Finder note,
+    /// otherwise the icon of the app it was written on — a generic app when that app is gone.
+    static func revealIcon(for key: String) -> NSImage {
+        if case .folder(let path) = revealTarget(for: key),
+            FileManager.default.fileExists(atPath: path)
+        {
+            return NSWorkspace.shared.icon(forFile: path)
+        }
+        let bundleID = key.components(separatedBy: "|")[0]
+        if let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+            return NSWorkspace.shared.icon(forFile: app.path)
+        }
+        return NSWorkspace.shared.icon(for: .applicationBundle)
     }
 
     /// Bring the surface a note belongs to back to the front. The note follows on its own: the

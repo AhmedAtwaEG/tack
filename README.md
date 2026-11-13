@@ -10,7 +10,7 @@ Sticky notes that stick to windows, not your desktop.
   <img src="images/example2.png" alt="A note pinned to a Finder folder" width="800">
 </p>
 
-Tack is a small macOS menu-bar app. Pin a note to a Finder folder or to any app window: the note follows that window as it moves, stays inside its bounds, and comes back when you do.
+Tack is a small macOS menu-bar app. Pin a note to a Finder folder or to any app window: the note follows that window as it moves, stays inside its bounds, and stays on it when you switch to another app, stepping aside only while another window covers it.
 
 A Finder note is saved as a hidden `.tack.json` inside the folder, so it travels with the folder when you move or copy it. Every other note lives in a central store keyed to the window, or to the tab in Chrome/Safari/Arc (by URL) and Terminal (by tty), so each tab can carry its own.
 
@@ -36,7 +36,9 @@ If you want a scratchpad, Stickies is fine. Tack is for notes that belong to a p
 
 Grab the zip for your Mac from the [latest release](../../releases/latest), `apple-silicon` for M-series or `intel` for Intel, unzip it, and right-click → Open the first time.
 
-Releases are built by GitHub's CI, which has no Apple Developer certificate, so the app is ad-hoc signed and not notarized. Gatekeeper calls it an "unidentified developer", and right-click → Open is the built-in way past that warning, once per download. Same cause, second symptom: an ad-hoc signature is unique per build and macOS ties permission grants to it, so after an update macOS re-asks for the permissions below. Everything else, your notes included, carries over untouched.
+Releases are built by GitHub's CI without an Apple Developer certificate, so the app is not notarized: Gatekeeper calls it an "unidentified developer", and right-click → Open is the built-in way past that warning, the first time. Every release is signed with the same Tack certificate, so macOS keeps the permissions below across updates (coming from v1.9.1 or older, it asks once more).
+
+Tack updates itself. Once a day it checks GitHub for a newer release and asks before installing it, and 📌 → Check for Updates… looks right away. It downloads the build for your Mac's chip, replaces itself and restarts. Your notes are not touched.
 
 Building from source avoids both if you have any codesigning identity in your keychain. `bundle.sh` picks the first one and keeps the signature stable across rebuilds, and the permission grants with it:
 
@@ -65,15 +67,13 @@ Type `**bold**`, `*italic*`, `` `code` ``, `~~strike~~` or a `#`/`##`/`###` head
   <img src="images/example1.png" alt="Bold, monospaced code and strikethrough in a note on a PDF window" width="49%">
 </p>
 
-A small glass dot sits in the note's top-right corner. Put the cursor on it and it opens leftwards into a pill of three dots, floating over the blurred text, and closes again when the cursor leaves. The first dot is a T in the note's typeface, the second wears its colour: click either and the pill widens into the choices, three faces (the system sans, New York serif, mono) or the palette's colours. Rest on a face and its dot opens out to spell *Tack* in that face, so you read the typeface before you pick it. A picker stays up once opened; clicking the card drops it. The red dot deletes the note, and one with text asks first.
+A small glass dot sits in the note's top-right corner. Put the cursor on it and it opens leftwards into a pill of dots, floating over the blurred text, and closes again when the cursor leaves. The first dot is a T in the note's typeface, the second wears its colour: click either and the pill widens into the choices, three faces (the system sans, New York serif, mono) or the palette's colours (yellow, pink, blue, white). Rest on a choice and the note previews it until you pick one or move the cursor off the pill. A picker stays up once opened; clicking the card drops it. The third dot wears where the note is pinned and lets you change it: this window or this app, plus this tab in Chrome/Safari/Arc and Terminal. It only appears when there's a choice to make, since Finder notes live in the folder itself and have no levels. The stack dot opens every note (below), and the red bin deletes the note, asking first when it has text.
 
 <p align="center">
   <img src="images/example3.png" alt="A note in a different typeface and colour" width="800">
 </p>
 
-Right-click the card for the rest. Color opens the full swatch grid the pill's colours come from: four to start (yellow, pink, blue, white), "+" adds one, and a tiny × removes one, though the last colour stays. Pin sets how widely the note shows, this window or this app, plus this tab in Chrome/Safari/Arc and Terminal. Pin only appears when there's a choice to make, since Finder notes live in the folder itself and have no levels.
-
-Click 📌 → Open Tack (⌘O) to see every note at once, each card under the window, tab or folder it's pinned to. The cards are live: edit one here or on its own window and the other keeps up as you type. ⌘-click a card's header and that window, tab or folder comes back to the front.
+Click the stack dot in a note's pill, or 📌 → Open Tack (⌘O), and the note lets go of its window and grows into a dashboard of every note, each card under the window, tab or folder it's pinned to. The cards are live: edit one here or on its own window and the other keeps up as you type. A card's pill has a dot that brings its window, tab or folder back to the front. The dashboard's own pill turns it back into the note, which shrinks home onto its window.
 
 <p align="center">
   <img src="images/video.gif" alt="Editing a note in the Tack window and on its Finder folder at the same time" width="800">

@@ -7,6 +7,10 @@ class GenericAppContainer: Container {
     let bundleID: String
     let pid: pid_t
     let ident: String
+    /// The window-server number of the window that was focused when this was resolved — the app
+    /// is frontmost then, so its first window is the one. What lets the note keep following
+    /// *that* window after the app has gone to the background. nil: nothing on screen to number.
+    private let window: Int?
 
     init?(app: NSRunningApplication) {
         // An empty AXDocument (Electron reports one) must fall through to the title, not end
@@ -24,9 +28,9 @@ class GenericAppContainer: Container {
             "identify \(app.bundleIdentifier ?? "?") as \(Self.self): focusedWindow=\(win != nil) "
                 + "document=\(win.flatMap { AXWindows.string($0, kAXDocumentAttribute) }.debugDescription) "
                 + "title=\(win.flatMap { AXWindows.string($0, kAXTitleAttribute) }.debugDescription)")
+        let window = WindowServer.window(of: app.processIdentifier)?.number
         guard id != nil
-            || (Self.self == GenericAppContainer.self && AXIsProcessTrusted()
-                && WindowServer.frontWindowBounds(pid: app.processIdentifier) != nil)
+            || (Self.self == GenericAppContainer.self && AXIsProcessTrusted() && window != nil)
         else {
             DebugLog.note("identify: no window identity, giving up")
             return nil
@@ -34,6 +38,7 @@ class GenericAppContainer: Container {
         self.bundleID = app.bundleIdentifier ?? app.localizedName ?? "app"
         self.pid = app.processIdentifier
         self.ident = id ?? ""
+        self.window = window
     }
 
     override var path: [String] { ident.isEmpty ? [bundleID] : [bundleID, ident] }
@@ -49,15 +54,21 @@ class GenericAppContainer: Container {
         try AppNotes.save(key: key(at: level), note: note)
     }
 
-    /// A focused app window is already on top, so nothing covers the note — `covering` stays
-    /// empty and the caller's occlusion test collapses to false on its own.
-    ///
     /// Bounds come from the window server, not AX: an AX read is a synchronous round-trip
     /// into the app's main thread, which is busy servicing the event loop during a drag, so
     /// the note trailed and stuttered. CGWindowList is fresh every frame — same source that
     /// keeps Finder tracking smooth. AX stays as the fallback for windows the list can't see.
+    ///
+    /// ponytail: a sheet can sit above its parent at layer 0 and be the window numbered at
+    /// resolve time — the note pins to the sheet until it closes.
     override func frame() -> Frame? {
-        if let rect = WindowServer.frontWindowBounds(pid: pid) { return Frame(bounds: rect) }
-        return AXWindows.focusedBounds(pid: pid).map { Frame(bounds: $0) }
+        if let hit = WindowServer.window(of: pid, number: window) { return hit.frame }
+        // The numbered window is off screen. In the background that is the whole answer: the
+        // note waits for it. In front, the app's frontmost window will do until the next poll
+        // resolves the surface again — and so it will when there never was a number.
+        let inFront = NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
+        guard window == nil || inFront else { return nil }
+        return WindowServer.window(of: pid)?.frame
+            ?? AXWindows.focusedBounds(pid: pid).map { Frame(bounds: $0) }
     }
 }

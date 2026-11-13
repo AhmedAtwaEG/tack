@@ -8,6 +8,7 @@ enum NotePersistenceError: LocalizedError {
     case backup(URL, Error)
     case write(URL, Error)
     case delete(URL, Error)
+    case occupied
 
     var errorDescription: String? {
         switch self {
@@ -27,6 +28,8 @@ enum NotePersistenceError: LocalizedError {
             return "Could not save notes at \(url.path): \(error.localizedDescription)"
         case .delete(let url, let error):
             return "Could not delete notes at \(url.path): \(error.localizedDescription)"
+        case .occupied:
+            return "Another note is already pinned there. Delete it first, then pin this one."
         }
     }
 }
@@ -137,6 +140,9 @@ enum NoteStore {
 /// window identity string, since a generic app window has no folder to write into. Each key
 /// holds that place's notes in the same one-or-many shape as a folder file.
 enum AppNotes {
+    /// Where the central store lives, nil if its folder can't be made.
+    static var storeURL: URL? { try? fileURL() }
+
     private static func fileURL() throws -> URL {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Tack", isDirectory: true)
@@ -203,9 +209,27 @@ struct StoredNote {
     var note: Note
 
     /// Finder notes only: the folder whose .tack.json holds this note.
-    var folder: String? {
+    var folder: String? { Self.folder(of: key) }
+
+    static func folder(of key: String) -> String? {
         let prefix = FinderContainer.bundleID + "|"
         return key.hasPrefix(prefix) ? String(key.dropFirst(prefix.count)) : nil
+    }
+
+    /// The file a note's key is written to: its folder's .tack.json, or the central store.
+    static func fileURL(of key: String) -> URL? {
+        folder(of: key).map(NoteStore.fileURL(forFolder:)) ?? AppNotes.storeURL
+    }
+
+    /// Every note at `key` as it is on disk right now; empty when there are none.
+    static func load(key: String) throws -> [Note] {
+        if let folder = folder(of: key) { return try NoteStore.load(folder: folder) }
+        return try AppNotes.load(key: key)
+    }
+
+    /// One note as it is on disk right now — nil when it isn't there (deleted, or never saved).
+    static func load(key: String, id: String?) throws -> Note? {
+        try load(key: key).first { $0.id == id }
     }
 
     /// Writes back to whichever store the note came from, at the very same key — a note pinned

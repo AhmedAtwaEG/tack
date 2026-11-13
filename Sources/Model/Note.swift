@@ -28,6 +28,21 @@ struct Note: Codable, Equatable {
     /// honours this one property, so "does trimming count as empty?" can only ever have one answer.
     var isDeletion: Bool { text.isEmpty }
 
+    /// What to write when saving `mine` over a file that may have changed since Tack last read
+    /// or wrote it (`seen`) — a script, another app, the dashboard. Field by field, for the
+    /// text, the colour and the typeface: whatever this save changed is the user's and goes as
+    /// is; whatever it left alone takes the file's value, so somebody else's change survives.
+    /// Placement (position, size) is always `mine`: only the note on screen knows where it is.
+    /// Nobody else wrote, or nothing to compare against: `mine` as is.
+    static func merge(mine: Note, seen: Note?, disk: Note?) -> Note {
+        guard let disk, let seen, disk != seen else { return mine }
+        var merged = mine
+        if mine.text == seen.text { merged.text = disk.text }
+        if mine.color == seen.color { merged.color = disk.color }
+        if mine.font == seen.font { merged.font = disk.font }
+        return merged
+    }
+
     /// What a collapsed note's bar reads: the first line with text in it, minus the markdown
     /// that marks its block (heading, list, quote, checkbox) and any bold/italic markers.
     static func title(of markdown: String) -> String {

@@ -9,7 +9,7 @@ import AppKit
 /// `note(keeping:)` is for: the card writes only the three fields it actually owns, and the
 /// owner's placement survives verbatim.
 final class NoteCard: NSObject {
-    /// The card. Mount it anywhere; the owner may add `onDrag` and `contextMenu` of its own.
+    /// The card. Mount it anywhere; the owner may add an `onDrag` of its own.
     let view: DragGlassView
     let editor: NoteEditor  // the text, its markdown rules, and the only writer to it
     let styler: NoteStyler  // the note's colour and typeface, and the tint that shows one
@@ -75,7 +75,10 @@ final class NoteCard: NSObject {
         // Editable text: the full card below the drag strip.
         // ponytail: no inset for the pill — closed it's a dot in a corner and the text is meant to
         // blur under it; reserving a line's worth of space for it on every note costs more.
-        editor = NoteEditor(frame: NSRect(x: 4, y: 4, width: w - 8, height: h - Self.strip - 4))
+        // Edge to edge, under the strip too: the text starts below it and fades through it.
+        editor = NoteEditor(frame: NSRect(x: 4, y: 0, width: w - 8, height: h))
+        editor.view.topBand = Self.strip
+        editor.view.bottomFade = 8
         view.addSubview(editor.view)
 
         title.font = .systemFont(ofSize: 12, weight: .medium)
@@ -89,12 +92,20 @@ final class NoteCard: NSObject {
         view.topBand = Self.strip
 
         super.init()
-        view.onPress = { [weak self] in self?.pill.close() }  // the picker's way out
-        editor.onPress = { [weak self] in self?.pill.close() }
+        view.onPress = { [weak self] in self?.pressed() }
+        editor.onPress = { [weak self] in self?.pressed() }
         editor.onEdit = { [weak self] in self?.onEdit() }
         pill.onFont = { [weak self] face, commit in self?.choose(family: face, commit: commit) }
         pill.onColor = { [weak self] color, commit in self?.choose(color: color, commit: commit) }
         pill.onDelete = { [weak self] in self?.deleteTapped() }
+    }
+
+    /// A click landed on the card, text or glass — the dashboard takes it as "this one".
+    var onPress: () -> Void = {}
+
+    private func pressed() {
+        pill.close()  // the picker's way out
+        onPress()
     }
 
     // MARK: - Contents
@@ -136,6 +147,13 @@ final class NoteCard: NSObject {
         }
     }
 
+    /// The dashboard covers the card while it is up: neither the text nor a folded note's title
+    /// may show through it, and afterwards whichever of the two the note had comes back.
+    func setUnderDashboard(_ under: Bool) {
+        editor.view.isHidden = under || isCollapsed
+        title.isHidden = under || !isCollapsed
+    }
+
     /// The card's three fields written over `base`. Where the note sits and how big it is belongs
     /// to the owner, so it comes straight back out of `base` untouched.
     func note(keeping base: Note) -> Note {
@@ -155,6 +173,44 @@ final class NoteCard: NSObject {
 
     func focus(in window: NSWindow?) { window?.makeFirstResponder(editor.textView) }
 
+    /// The card turning into a plain pane of `color`: the text and the pill fade out while the
+    /// tint washes over. `restorePane` puts the note back exactly as it was.
+    func fadeToPane(_ color: NSColor, duration: TimeInterval) {
+        pill.reset()
+        styler.fade(to: color, duration: duration)
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = duration * 0.6  // the words go first; the colour carries the rest
+            editor.view.animator().alphaValue = 0
+            pill.view.animator().alphaValue = 0
+        }
+    }
+
+    /// `fadeToPane` in reverse: from a plain pane of `color`, the note's colour washes back in
+    /// and its words return, last — so they land on a card the size they were written for.
+    func fadeFromPane(_ color: NSColor, duration: TimeInterval) {
+        pill.reset()
+        editor.view.alphaValue = 0
+        pill.view.alphaValue = 0
+        styler.showSolid(color)
+        styler.fadeBack(duration: duration)
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = duration * 0.4
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+        } completionHandler: { [weak self] in
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = duration * 0.6
+                self?.editor.view.animator().alphaValue = 1
+                self?.pill.view.animator().alphaValue = 1
+            }
+        }
+    }
+
+    func restorePane() {
+        editor.view.alphaValue = 1
+        pill.view.alphaValue = 1
+        styler.restoreColor()
+    }
+
     // MARK: - Choosing a look
 
     /// What choosing a typeface means, whether the pill is previewing one under the cursor or
@@ -170,8 +226,7 @@ final class NoteCard: NSObject {
         onEdit()
     }
 
-    /// The same, for a colour — from a swatch under the cursor, a swatch click, or live from the
-    /// system colour panel behind the card's right-click menu.
+    /// The same, for a colour — from a swatch under the cursor, or a swatch click.
     func choose(color: NSColor, commit: Bool) {
         if commit { styler.commitColor(color) } else { styler.showColor(color) }
         guard commit else { return }

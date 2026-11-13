@@ -6,7 +6,7 @@ import AppKit
 /// is only ever one owner of what the note says.
 final class NoteEditor: NSObject, NSTextViewDelegate {
     /// The scroll view to mount in the note's card.
-    let view: NSScrollView
+    let view: FocusScrollView
     let textView: MarkdownTextView
 
     /// The buffer changed and is worth persisting.
@@ -25,7 +25,7 @@ final class NoteEditor: NSObject, NSTextViewDelegate {
     private func adoptFamily() { MarkdownStyle.family = family }
 
     init(frame: NSRect) {
-        view = NSScrollView(frame: frame)
+        view = FocusScrollView(frame: frame)
         view.drawsBackground = false
         view.hasVerticalScroller = false
         view.autoresizingMask = [.width, .height]
@@ -118,5 +118,62 @@ final class NoteEditor: NSObject, NSTextViewDelegate {
     /// falls through to the text view's own handling.
     func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
         MarkdownInput.handle(selector, textView)
+    }
+}
+
+/// The scroll view behind a note's text and the dashboard's grid. Two jobs:
+///
+/// It scrolls only while it is allowed to. When it isn't — a card in the dashboard that hasn't
+/// been clicked — the wheel goes on to whatever holds it, so the dashboard scrolls as a whole
+/// instead of catching on every note the cursor crosses.
+///
+/// And it runs edge to edge. What it shows starts below `topBand` — the strip the note or the
+/// dashboard is dragged by — but scrolls up under it to the very top, fading out on the way,
+/// and fades out the same way at the bottom. Before, it ended in a hard line under the strip
+/// while the bottom ran to the border, and the two edges looked like different things.
+final class FocusScrollView: NSScrollView {
+    var scrollsItself = true
+
+    /// The strip at the top: where scrolled content starts, fades through, and lets clicks fall
+    /// through to what's underneath, so the strip still drags.
+    var topBand: CGFloat = 0 {
+        didSet {
+            automaticallyAdjustsContentInsets = false
+            contentInsets.top = topBand
+            needsLayout = true
+        }
+    }
+    /// How far from the bottom edge content fades out.
+    var bottomFade: CGFloat = 0 {
+        didSet {
+            contentInsets.bottom = bottomFade / 2  // the last line can still come clear of it
+            needsLayout = true
+        }
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        if scrollsItself { super.scrollWheel(with: event) } else { nextResponder?.scrollWheel(with: event) }
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let local = convert(point, from: superview)
+        if local.y > bounds.height - topBand { return nil }  // the strip: not ours
+        return super.hitTest(point)
+    }
+
+    override func layout() {
+        super.layout()
+        guard topBand > 0 || bottomFade > 0, bounds.height > 0 else { return }
+        wantsLayer = true
+        let fade = (layer?.mask as? CAGradientLayer) ?? CAGradientLayer()
+        let height = bounds.height
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)  // a resize must not animate the mask behind it
+        fade.frame = bounds
+        // Bottom to top: this layer isn't flipped. Clear at both edges, solid in between.
+        fade.colors = [NSColor.clear, .black, .black, .clear].map(\.cgColor)
+        fade.locations = [0, bottomFade / height, 1 - topBand / height, 1].map { NSNumber(value: Double($0)) }
+        layer?.mask = fade
+        CATransaction.commit()
     }
 }
