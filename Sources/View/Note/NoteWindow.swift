@@ -473,7 +473,6 @@ final class NoteWindow: NSObject, NSWindowDelegate {
                 window.level = .floating
                 self.dashboard = nil
                 collapsing = false
-                lifting = false
                 if returning {
                     shown = true
                     occluded = false  // the next tracking frame hides it again if something covers it
@@ -484,6 +483,9 @@ final class NoteWindow: NSObject, NSWindowDelegate {
                     card.restorePane()
                     shown = false
                 }
+                // Only now: the frame put back above is Tack's, not the user's — read back as a
+                // move it would save the note again, bringing back one deleted meanwhile.
+                lifting = false
             })
     }
 

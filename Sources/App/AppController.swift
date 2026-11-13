@@ -1,18 +1,26 @@
 import AppKit
 
-/// One note on screen: its window, the level it is pinned at, and what Tack last knew of it.
+/// One note on screen: its window, where it is stored, and what Tack last knew of it.
 final class ShownNote {
     let window: NoteWindow
+    /// The surface it was shown on. Its own, not its place's: the place swaps in a fresh
+    /// container when a tab's title changes, and a key built from the new title would lose a note
+    /// stored under the old one. The save closure writes through this same container.
+    let container: Container
     let level: LevelBox  // see LevelBox
     /// The note as Tack last read or wrote it — what a save compares the file against, so it
     /// never writes over a newer one (see Note.merge).
     var seen: Note?
 
-    init(window: NoteWindow, level: LevelBox, seen: Note?) {
+    init(window: NoteWindow, container: Container, level: LevelBox, seen: Note?) {
         self.window = window
+        self.container = container
         self.level = level
         self.seen = seen
     }
+
+    /// Where the note is stored right now. Computed, not kept: a pin change moves it.
+    var key: String { container.key(at: level.value) }
 }
 
 /// One app's place on screen: the surface its notes are glued to, and every note pinned there.
@@ -27,9 +35,6 @@ final class ShownPlace {
     var missing = 0  // samples in a row its window was nowhere on a desktop in view — see trackNotes
 
     init(container: Container) { self.container = container }
-
-    /// Where `note` is stored right now. Computed, not kept: a pin change moves it.
-    func key(of note: ShownNote) -> String { container.key(at: note.level.value) }
 }
 
 /// Owns the app's lifecycle and the two loops that decide which notes are on screen
@@ -269,11 +274,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// caller starts tracking.
     @discardableResult
     private func show(_ n: Note, level: Int, in place: ShownPlace, frame f: Frame) -> NoteWindow {
-        let container = place.container  // a later replacement has the same keys: same focus key
+        let container = place.container
         let box = LevelBox(level)  // this note's own level cell — see LevelBox
         let busy = busyWindows
-        let window = pool.first { !busy.contains(ObjectIdentifier($0)) } ?? makeWindow()
-        let shown = ShownNote(window: window, level: box, seen: n)
+        // A free window still holding an edit is one whose save failed (every other was flushed
+        // before the poll got here). It keeps that edit for a later flush — on quit at the latest
+        // — rather than have it dropped by the next note it shows.
+        let window = pool.first { !busy.contains(ObjectIdentifier($0)) && !$0.hasPendingEdit } ?? makeWindow()
+        let shown = ShownNote(window: window, container: container, level: box, seen: n)
         place.notes.append(shown)
         place.lastBounds = nil
         place.stillFrames = 0  // a note just shown tracks at full rate from its first frame
@@ -378,7 +386,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// The note on screen stored at `key` under `id`, if any.
     private func shown(key: String, id: String?) -> (place: ShownPlace, note: ShownNote)? {
-        allShown.first { $0.place.key(of: $0.note) == key && $0.note.window.noteID == id }
+        allShown.first { $0.note.key == key && $0.note.window.noteID == id }
     }
 
     // MARK: - Changes from outside
@@ -391,7 +399,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// A date per file, not a watcher: one stat per file per poll is nothing, it survives the
     /// write-to-a-temp-file-and-rename most tools do, and Finder notes live in many folders.
     private func syncFromDisk() {
-        var onScreen = allShown.map { $0.place.key(of: $0.note) }
+        var onScreen = allShown.map(\.note.key)
         if dashboardNote != nil { onScreen += grid.keys }
         var keysByFile: [URL: Set<String>] = [:]
         for key in onScreen {
@@ -425,7 +433,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// version unless the user is mid-edit there, and goes if it was deleted there. The
     /// dashboard follows.
     private func adoptFromDisk(key: String, notes: [Note]) {
-        for (place, shown) in allShown where place.key(of: shown) == key {
+        for (_, shown) in allShown where shown.key == key {
             guard !shown.window.hasPendingEdit else { continue }
             if let note = notes.first(where: { $0.id == shown.window.noteID }) {
                 shown.seen = note
@@ -492,7 +500,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         flushAll()  // the grid is about to read disk
         let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
-        let host = note ?? places[front]?.notes.first?.window ?? looseNote
+        // A note still shrinking back from the last dashboard can't grow into the next one yet.
+        let candidates = [note, places[front]?.notes.first?.window, looseNote]
+        guard let host = candidates.compactMap({ $0 }).first(where: { !$0.isExpanded }) else { return }
         grid.reload()
         host.onCollapse = { [weak self] in self?.closeDashboard() }
         host.onDashboardPress = { [weak self] in self?.grid.unfocus() }
