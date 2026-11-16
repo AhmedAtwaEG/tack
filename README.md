@@ -34,13 +34,7 @@ If you want a scratchpad, Stickies is fine. Tack is for notes that belong to a p
 
 ## Install
 
-Grab the zip for your Mac from the [latest release](../../releases/latest), `apple-silicon` for M-series or `intel` for Intel, unzip it, and right-click → Open the first time.
-
-Releases are built by GitHub's CI without an Apple Developer certificate, so the app is not notarized: Gatekeeper calls it an "unidentified developer", and right-click → Open is the built-in way past that warning, the first time. Every release is signed with the same Tack certificate, so macOS keeps the permissions below across updates (coming from v1.9.1 or older, it asks once more).
-
-Tack doesn't update itself. To update, pull the latest source and run `bundle.sh` again. Your notes are not touched.
-
-Building from source avoids both if you have any codesigning identity in your keychain. `bundle.sh` picks the first one and keeps the signature stable across rebuilds, and the permission grants with it:
+Tack is built from source. You need any codesigning identity in your keychain: `bundle.sh` picks the first one and keeps the signature the same across rebuilds, so macOS keeps the permission grants below each time you rebuild:
 
 ```sh
 git clone <repo-url>
@@ -49,6 +43,8 @@ cd tack
 ```
 
 Requires macOS 14+ and the Xcode command-line tools.
+
+Tack doesn't update itself. To update, pull the latest source and run `bundle.sh` again. Your notes are not touched.
 
 On first launch macOS asks to control Finder (and later Terminal, for tab notes) and for Accessibility access, which is how Tack tracks app windows. Grant both and the 📌 appears in the menu bar.
 
@@ -73,7 +69,7 @@ A small glass dot sits in the note's top-right corner. Put the cursor on it and 
   <img src="images/example3.png" alt="A note in a different typeface and colour" width="800">
 </p>
 
-Click the stack dot in a note's pill, or 📌 → Open Tack (⌘O), and the note lets go of its window and grows into a dashboard of every note, each card under the window, tab or folder it's pinned to. The cards are live: edit one here or on its own window and the other keeps up as you type. A card's pill has a dot that brings its window, tab or folder back to the front. The dashboard's own pill turns it back into the note, which shrinks home onto its window.
+Click the stack dot in a note's pill, or 📌 → Open Tack (⌘O), and the Tack window opens on every note, grouped by app and then by the window, tab or folder each one is pinned to. It opens on the desktop you're on. The search field in its toolbar narrows the notes to the ones whose words, app or place match, and the gear switches to Settings. The cards are live: edit one here or on its own window and the other keeps up as you type. Go to, and a card's pill dot, bring that window, tab or folder to the front.
 
 <p align="center">
   <img src="images/video.gif" alt="Editing a note in the Tack window and on its Finder folder at the same time" width="800">
