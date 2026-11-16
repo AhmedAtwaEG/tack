@@ -65,6 +65,7 @@ enum SelfTest {
         dashboardGroups()
         dashboardSearch()
         dashboardPlacement()
+        notesAddedOnDisk()
         print("✅ all self-tests passed")
     }
 
@@ -1330,6 +1331,18 @@ extension SelfTest {
         assert(prefs.pinsAppWide("a") && prefs.pinsAppWide("b"), "each app remembers its own")
         prefs.setPinsAppWide("a", false)
         assert(!prefs.pinsAppWide("a") && prefs.pinsAppWide("b"), "and forgets only its own")
+    }
+
+    static func notesAddedOnDisk() {
+        let a = Note(text: "a", dx: 0, dy: 0, id: "A")
+        let b = Note(text: "b", dx: 0, dy: 0, id: "B")
+        assert(AppDelegate.unshown([a, b], shown: ["A"]) == [b], "only the note no window shows is new")
+        assert(AppDelegate.unshown([a, b], shown: ["A", "B"]).isEmpty, "every note shown: nothing new")
+        assert(AppDelegate.unshown([a], shown: []) == [a], "nothing shown: every note is new")
+        let legacy = Note(text: "old", dx: 0, dy: 0)
+        assert(AppDelegate.unshown([legacy], shown: [nil]).isEmpty, "an id-less note shown is not new")
+        let empty = Note(text: "", dx: 0, dy: 0, id: "E")
+        assert(AppDelegate.unshown([empty], shown: []).isEmpty, "an empty note is never put up")
     }
 
     static func dashboardPlacement() {

@@ -400,7 +400,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// A date per file, not a watcher: one stat per file per poll is nothing, it survives the
     /// write-to-a-temp-file-and-rename most tools do, and Finder notes live in many folders.
     private func syncFromDisk() {
-        var onScreen = allShown.map(\.note.key)
+        // Every level a shown place loads, not only the ones holding a note now: a note a script
+        // adds to any of them belongs on screen too.
+        var onScreen = Array(places.values.flatMap(\.container.allKeys)) + allShown.map(\.note.key)
         if dashboardOpen { onScreen += grid.keys }
         var keysByFile: [URL: Set<String>] = [:]
         for key in onScreen {
@@ -447,7 +449,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 forget(shown.window)
             }
         }
+        showAddedOnDisk(key: key, notes: notes)
         if dashboardOpen { grid.adoptFromDisk(key: key, notes: notes) }
+    }
+
+    /// Notes that appeared at `key` from outside Tack go up on every place on screen that loads
+    /// `key`, the way coming back to that place would have shown them.
+    private func showAddedOnDisk(key: String, notes: [Note]) {
+        for place in places.values {
+            let container = place.container
+            // Finest first, as loadAll assigns a note to its level.
+            guard let level = stride(from: container.finestLevel, through: container.minLevel, by: -1)
+                .first(where: { container.key(at: $0) == key })
+            else { continue }
+            // By id across the whole place: a note shown at another of its levels is not new here.
+            let added = Self.unshown(notes, shown: place.notes.map(\.window.noteID))
+            guard !added.isEmpty, let f = container.frame() else { continue }
+            for note in added {
+                DebugLog.note("disk: id=\(note.id ?? "-") added at \(key), showing")
+                show(note, level: level, in: place, frame: f)
+            }
+            startTracking()
+        }
+    }
+
+    /// The notes in `notes` no window shows yet, matched by id. Pure.
+    static func unshown(_ notes: [Note], shown: [String?]) -> [Note] {
+        notes.filter { !$0.isDeletion && !shown.contains($0.id) }
     }
 
     /// A note missing from its file was deleted by somebody else only if Tack last knew it with words in it: an empty note is never stored (`Note.isDeletion`), so one dragged before being typed in, or just emptied, is missing because Tack saved it so, and hiding it would pull it from under the caret.
