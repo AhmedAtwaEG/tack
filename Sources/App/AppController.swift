@@ -256,6 +256,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Replace whatever `container`'s app shows with `notes`, all on `container`.
     private func present(_ notes: [(note: Note, level: Int)], frame f: Frame, container: Container) {
         hidePlace(app: container.app)
+        DebugLog.note("present: \(notes.count) note(s) on \(container.focusKey)")
         guard !notes.isEmpty else { return }
         let place = ShownPlace(container: container)
         places[container.app] = place
@@ -282,6 +283,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // — rather than have it dropped by the next note it shows.
         let window = pool.first { !busy.contains(ObjectIdentifier($0)) && !$0.hasPendingEdit } ?? makeWindow()
         let shown = ShownNote(window: window, container: container, level: box, seen: n)
+        DebugLog.note("show: id=\(n.id ?? "-") level=\(level) chars=\(n.text.count) window=\(pool.firstIndex { $0 === window } ?? -1)")
         place.notes.append(shown)
         place.lastBounds = nil
         place.stillFrames = 0  // a note just shown tracks at full rate from its first frame
@@ -293,6 +295,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let disk = try container.notes(at: box.value).first { $0.id == edited.id }
                 let toWrite = Note.merge(mine: edited, seen: shown?.seen, disk: disk)
                 try container.write(toWrite, at: box.value)
+                DebugLog.note("save: id=\(toWrite.id ?? "-") chars=\(toWrite.text.count) merged=\(toWrite != edited)")
                 shown?.seen = toWrite
                 if toWrite != edited { self.cascade(key: container.key(at: box.value), note: toWrite) }
             }
@@ -436,9 +439,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for (_, shown) in allShown where shown.key == key {
             guard !shown.window.hasPendingEdit else { continue }
             if let note = notes.first(where: { $0.id == shown.window.noteID }) {
+                DebugLog.note("disk: id=\(note.id ?? "-") changed=\(shown.window.currentNote != note)")
                 shown.seen = note
                 if shown.window.currentNote != note { shown.window.applyLive(note) }
             } else if Self.deletedElsewhere(seen: shown.seen) {
+                DebugLog.note("disk: id=\(shown.window.noteID ?? "-") deleted elsewhere, hiding")
                 shown.seen = nil
                 shown.window.hide()
                 forget(shown.window)
@@ -567,6 +572,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Take down every note `app` is showing. Every other app's notes are left alone.
     private func hidePlace(app: String) {
         guard let place = places.removeValue(forKey: app) else { return }
+        DebugLog.note("hide: \(place.notes.count) note(s) of \(app)")
         place.notes.forEach { $0.window.hide() }
     }
 
