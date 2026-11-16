@@ -21,7 +21,6 @@ final class NoteCard: NSObject {
     /// a note never quietly belongs to less than you think. A click opens the pin picker.
     private let place = NSButton(title: "", target: nil, action: nil)
     private var hasPlace = false
-    private var underDashboard = false
 
     /// The text, colour or face changed and is worth persisting.
     var onEdit: () -> Void = {}
@@ -157,10 +156,10 @@ final class NoteCard: NSObject {
     @objc private func placeClicked() { pill.openPinPicker() }
 
     private func updatePlaceVisibility() {
-        place.isHidden = !hasPlace || isCollapsed || underDashboard
+        place.isHidden = !hasPlace || isCollapsed
     }
 
-    /// A click landed on the card, text or glass — the dashboard takes it as "this one".
+    /// A click landed on the card, text or glass — the Tack window takes it as "this one".
     var onPress: () -> Void = {}
 
     private func pressed() {
@@ -208,15 +207,6 @@ final class NoteCard: NSObject {
         }
     }
 
-    /// The dashboard covers the card while it is up: neither the text nor a folded note's title
-    /// may show through it, and afterwards whichever of the two the note had comes back.
-    func setUnderDashboard(_ under: Bool) {
-        editor.view.isHidden = under || isCollapsed
-        title.isHidden = under || !isCollapsed
-        underDashboard = under
-        updatePlaceVisibility()
-    }
-
     /// The card's three fields written over `base`. Where the note sits and how big it is belongs
     /// to the owner, so it comes straight back out of `base` untouched.
     func note(keeping base: Note) -> Note {
@@ -235,48 +225,6 @@ final class NoteCard: NSObject {
     }
 
     func focus(in window: NSWindow?) { window?.makeFirstResponder(editor.textView) }
-
-    /// The card turning into a plain pane of `color`: the text and the pill fade out while the
-    /// tint washes over. `restorePane` puts the note back exactly as it was.
-    func fadeToPane(_ color: NSColor, duration: TimeInterval) {
-        pill.reset()
-        styler.fade(to: color, duration: duration)
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = duration * 0.6  // the words go first; the colour carries the rest
-            editor.view.animator().alphaValue = 0
-            pill.view.animator().alphaValue = 0
-            place.animator().alphaValue = 0
-        }
-    }
-
-    /// `fadeToPane` in reverse: from a plain pane of `color`, the note's colour washes back in
-    /// and its words return, last — so they land on a card the size they were written for.
-    func fadeFromPane(_ color: NSColor, duration: TimeInterval) {
-        pill.reset()
-        editor.view.alphaValue = 0
-        pill.view.alphaValue = 0
-        place.alphaValue = 0
-        styler.showSolid(color)
-        styler.fadeBack(duration: duration)
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = duration * 0.4
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
-        } completionHandler: { [weak self] in
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = duration * 0.6
-                self?.editor.view.animator().alphaValue = 1
-                self?.pill.view.animator().alphaValue = 1
-                self?.place.animator().alphaValue = 1
-            }
-        }
-    }
-
-    func restorePane() {
-        editor.view.alphaValue = 1
-        pill.view.alphaValue = 1
-        place.alphaValue = 1
-        styler.restoreColor()
-    }
 
     // MARK: - Choosing a look
 

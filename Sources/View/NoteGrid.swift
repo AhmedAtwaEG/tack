@@ -1,22 +1,18 @@
 import AppKit
 
-/// Every note Tack holds, laid out side by side — what a note shows when it grows into the
-/// Tack dashboard. Only the contents: there is no window of its own, the note *is* the window.
+/// Every note Tack holds, laid out side by side — the page the Tack window (`DashboardWindow`)
+/// shows. Only the contents: the window, its search field and its background are the window's.
 ///
 /// Each cell is a real `NoteCard`, not a picture of one: the same glass, the same markdown, the
 /// same hover pill. What a cell may change is exactly what a card owns — text, colour, face —
 /// so browsing the grid can never move or resize a note on the window it belongs to.
 final class NoteGrid: NSObject {
-    /// The dashboard's top strip, which it is dragged by and the pill sits in.
-    static let strip: CGFloat = 30
-
-    /// The dashboard's page: the search field in the strip over the scrolling grid. Mount it in
-    /// whatever note is showing the dashboard — over the whole card, strip included.
-    let view: NSView = PassThroughView(frame: NSRect(x: 0, y: 0, width: 760, height: 520))
+    /// The scrolling grid. Mount it anywhere; it fills whatever it is given.
+    var view: NSView { scroll }
     private let scroll: FocusScrollView
     private let wrap = WrapView()
-    /// Narrows the grid to the notes whose words, app or place contain what is typed.
-    private let search = NSSearchField()
+    /// Narrows the grid to the notes whose words, app or place contain every word of it.
+    private var query = ""
     private var cells: [NoteGridCell] = []
     /// The card last clicked: the one that scrolls its own text, and sits lifted off the rest.
     private weak var focused: NoteGridCell?
@@ -25,8 +21,6 @@ final class NoteGrid: NSObject {
 
     /// An edit made in the dashboard, as it lands — for the floating note showing the same one.
     var onLiveEdit: ((String, Note) -> Void)?
-    /// A cell brought the app its note lives on to the front.
-    var onReveal: (() -> Void)?
     /// The notes in the grid — or their colours — may have changed: the dashboard repaints its
     /// background from `colors`.
     var onChange: (() -> Void)?
@@ -46,7 +40,6 @@ final class NoteGrid: NSObject {
     init(onError: @escaping (Error) -> Void) {
         self.onError = onError
         scroll = FocusScrollView(frame: NSRect(x: 0, y: 0, width: 760, height: 520))
-        scroll.topBand = Self.strip  // cards scroll up under the strip the dashboard is dragged by
         scroll.bottomFade = 16
         scroll.autoresizingMask = [.width, .height]
         scroll.drawsBackground = false
@@ -55,27 +48,19 @@ final class NoteGrid: NSObject {
         wrap.frame = NSRect(origin: .zero, size: scroll.contentSize)
         wrap.autoresizingMask = [.width]  // the clip view owns the width; layout() sets the height
         scroll.documentView = wrap
-        view.autoresizingMask = [.width, .height]
-        view.addSubview(scroll)
-        // In the strip's left end; the pill has its right end. The rest of the strip still drags.
-        search.placeholderString = "Search notes"
-        search.controlSize = .small
-        search.font = .systemFont(ofSize: 11)
-        search.sendsSearchStringImmediately = true
-        search.frame = NSRect(x: 12, y: view.bounds.height - Self.strip + 5, width: 200, height: 20)
-        search.autoresizingMask = [.minYMargin]
-        view.addSubview(search)
         super.init()
         wrap.onPress = { [weak self] in self?.unfocus() }
-        search.target = self
-        search.action = #selector(searchChanged)
     }
 
-    @objc private func searchChanged() { applyFilter() }
+    /// Show only the notes matching `query`. Kept across reloads: a reload under a search the
+    /// user is still looking at must not quietly show everything again.
+    func search(_ query: String) {
+        self.query = query
+        applyFilter()
+    }
 
     /// Show only the cards that match the search, and only the headings that still head one.
     private func applyFilter() {
-        let query = search.stringValue
         for cell in cells {
             cell.isHidden = !Self.matches(query, cell.searchText)
         }
@@ -133,7 +118,6 @@ final class NoteGrid: NSObject {
         }
         defer { onChange?() }
         wrap.subviews.filter { $0 is GridHeading }.forEach { $0.removeFromSuperview() }
-        search.stringValue = ""  // every opening starts on every note
         guard !stored.isEmpty else {
             setPlaceholder(true)
             wrap.needsLayout = true
@@ -146,14 +130,12 @@ final class NoteGrid: NSObject {
                 place.notes.forEach { add(NoteGridCell(stored: $0)) }
             }
         }
-        wrap.needsLayout = true
+        applyFilter()
     }
 
     private func heading(app: String, key: String?) -> GridHeading {
-        GridHeading(app: app, key: key) { [weak self] key in
-            guard Container.reveal(key: key) else { return }
-            self?.onReveal?()
-        }
+        // The window stays up: the app brought forward simply comes in front of it.
+        GridHeading(app: app, key: key) { key in Container.reveal(key: key) }
     }
 
     /// A note changed in its floating window while the dashboard is up. Keystrokes arrive here
@@ -212,7 +194,6 @@ final class NoteGrid: NSObject {
             self?.onLiveEdit?(key, note)
             self?.onChange?()  // a colour picked on a card shows in the background at once
         }
-        cell.onReveal = { [weak self] in self?.onReveal?() }
         cell.onPress = { [weak self, weak cell] in self?.focus(cell) }
         setPlaceholder(false)
         cells.append(cell)
@@ -251,6 +232,9 @@ final class NoteGrid: NSObject {
     @discardableResult func flush() -> Bool {
         cells.map { $0.flush() }.allSatisfy { $0 }
     }
+
+    /// Forget every edit still waiting to be written — the user chose to lose them.
+    func discardPending() { cells.forEach { $0.discardPending() } }
 
     private func drop(_ cell: NoteGridCell) {
         cells.removeAll { $0 === cell }
@@ -368,7 +352,6 @@ private final class NoteGridCell: NSView {
     var onError: (Error) -> Void = { _ in }
     var onDelete: (NoteGridCell) -> Void = { _ in }
     var onLiveEdit: (String, Note) -> Void = { _, _ in }
-    var onReveal: () -> Void = {}
     var onPress: () -> Void = {}
 
     var key: String { stored.key }
@@ -399,8 +382,8 @@ private final class NoteGridCell: NSView {
         card.onDelete = { [weak self] in self?.deleteConfirmed() }
         card.pill.revealIcon = Container.revealIcon(for: stored.key)
         card.pill.onReveal = { [weak self] in
-            guard let self, Container.reveal(key: key) else { return }
-            onReveal()
+            guard let self else { return }
+            Container.reveal(key: key)
         }
     }
 
@@ -503,6 +486,8 @@ private final class NoteGridCell: NSView {
 
     @discardableResult func flush() -> Bool { saver.flush() }
 
+    func discardPending() { saver.cancel() }
+
     /// Adopt a version of this note that came from somewhere else — the floating window. Any
     /// pending save is dropped rather than merged: it is older than what just arrived, and one
     /// note can't be typed in two places at once.
@@ -523,15 +508,6 @@ private final class NoteGridCell: NSView {
         saver.cancel()  // a stale delayed save must not recreate the note that just went
         onLiveEdit(stored.key, deletion)  // and its floating twin goes with it
         onDelete(self)
-    }
-}
-
-/// The dashboard's page: lets every click through that none of its own views take — the strip
-/// behind the search field still drags the dashboard.
-private final class PassThroughView: NSView {
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        let hit = super.hitTest(point)
-        return hit === self ? nil : hit
     }
 }
 

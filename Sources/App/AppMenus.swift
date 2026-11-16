@@ -34,6 +34,7 @@ extension AppDelegate {
     /// puts the caret in it.
     @objc func addNote() {
         let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "-"
+        DebugLog.note("addNote: front=\(front) current=\(current?.focusKey ?? "nil")")
         guard let container = resolve() else {
             DebugLog.note("addNote: front=\(front): no surface identified")
             // Finder works without the grant; everything else needs it. Say so rather than do
@@ -74,7 +75,7 @@ extension AppDelegate {
 
     /// Opens the Tack window on every note. The floating notes are flushed first: each can be up
     /// to a debounce behind the disk the grid is about to read.
-    @objc func openTack() { openDashboard(from: nil) }
+    @objc func openTack() { openDashboard() }
 
     /// Terminates Tack through AppKit, which first asks the app delegate to flush pending saves.
     @objc func quit() { NSApp.terminate(nil) }

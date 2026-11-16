@@ -18,8 +18,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/$EXE"
 cp Info.plist "$APP/Contents/Info.plist"
-# The updater compares this against the latest release, so it must be the real version: CI
-# passes the tag it is building; a local build takes the last tag it sits on (or after).
+# Shown in Settings: the last tag this build sits on (or after), unless VERSION is passed.
 VERSION="${VERSION:-$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')}"
 VERSION="${VERSION:-0.0.0}"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" \

@@ -70,9 +70,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.syncFromDisk()
         }
         pollTimer?.tolerance = 0.1  // lets macOS line this wake-up up with others
-        // No updater in this build: the author's releases are the stock app, and installing one
-        // over this local build would drop its own features and its signing (and with it the
-        // Accessibility grant). Updates come from merging upstream and running bundle.sh.
+        // No updater in this build: installing anyone's release over it would drop its own
+        // features and its signing (and with it the Accessibility grant). bundle.sh updates it.
 
         // A note outlives its app's focus now, so nothing else would ever take it down when the
         // app quits: its window just vanishes from the list and the note would wait for it forever.
@@ -111,7 +110,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Every window's pending edit, written now. Every window is flushed even after one fails: a
     /// note that can't save must not cost the others theirs.
     @discardableResult func flushAll() -> Bool {
-        (pool + [looseNote]).map { $0.flushPendingSave() }.allSatisfy { $0 }
+        pool.map { $0.flushPendingSave() }.allSatisfy { $0 }
     }
 
     // MARK: - Target resolution
@@ -137,14 +136,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self?.pollWhenSettled = false
                 self?.pollTarget()
             }
-            return
-        }
-        // The note that is the dashboard keeps its app's place until it turns back into a note:
-        // re-showing or hiding that place meanwhile would yank the dashboard away.
-        if let host = dashboardNote,
-            let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
-            places[front]?.notes.contains(where: { $0.window === host }) == true
-        {
             return
         }
         guard let container = resolve() else {
@@ -267,11 +258,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         startTracking()
     }
 
-    /// Windows that can't be handed a new note: one showing a note, or one that is the dashboard
-    /// — until it has finished shrinking back, which outlasts `dashboardNote`.
+    /// Windows that can't be handed a new note: the ones showing a note.
     private var busyWindows: Set<ObjectIdentifier> {
-        let showing = places.values.flatMap(\.notes).map(\.window)
-        return Set((showing + pool.filter(\.isExpanded)).map(ObjectIdentifier.init))
+        Set(places.values.flatMap(\.notes).map { ObjectIdentifier($0.window) })
     }
 
     /// Put one note on screen in `place`, in a free window from the pool or a new one. The
@@ -303,18 +292,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if toWrite != edited { self.cascade(key: container.key(at: box.value), note: toWrite) }
             }
         }
-        // Only an open dashboard cares, and only it knows this note by its storage key.
+        // Only an open Tack window cares, and only it knows this note by its storage key.
         window.onLiveEdit = { [weak self] edited in
-            self?.grid.update(key: container.key(at: box.value), note: edited)
+            guard let self, dashboardOpen else { return }
+            grid.update(key: container.key(at: box.value), note: edited)
         }
         window.onDelete = { [weak self, weak window] in
             guard let self, let window else { return }
             forget(window)
         }
-        window.onOpenAll = { [weak self, weak window] in
-            guard let self, let window else { return }
-            openDashboard(from: window)
-        }
+        window.onOpenAll = { [weak self] in self?.openDashboard() }
         let choices = container.pinLevels.map {
             (
                 level: $0, label: LevelName.label(level: $0, of: container.path.count),
@@ -340,7 +327,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             // The dashboard knows a note by its key, and the key just changed: left alone, its
             // cell would write the note back under the old one on the next edit there.
-            self.grid.reload()
+            if self.dashboardOpen { self.grid.reload() }
             return true
         }
         apply(f, to: window)
@@ -414,13 +401,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// write-to-a-temp-file-and-rename most tools do, and Finder notes live in many folders.
     private func syncFromDisk() {
         var onScreen = allShown.map(\.note.key)
-        if dashboardNote != nil { onScreen += grid.keys }
+        if dashboardOpen { onScreen += grid.keys }
         var keysByFile: [URL: Set<String>] = [:]
         for key in onScreen {
             if let url = StoredNote.fileURL(of: key) { keysByFile[url, default: []].insert(key) }
         }
         // The dashboard also gains notes a script adds to the central store.
-        if dashboardNote != nil, let store = AppNotes.storeURL, keysByFile[store] == nil {
+        if dashboardOpen, let store = AppNotes.storeURL, keysByFile[store] == nil {
             keysByFile[store] = []
         }
 
@@ -432,7 +419,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let known, known != date else { continue }  // first look only records the date
             do {
                 var changed = keys
-                if url == AppNotes.storeURL, dashboardNote != nil {
+                if url == AppNotes.storeURL, dashboardOpen {
                     changed.formUnion(try AppNotes.all().keys)
                 }
                 for key in changed { adoptFromDisk(key: key, notes: try StoredNote.load(key: key)) }
@@ -460,7 +447,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 forget(shown.window)
             }
         }
-        if dashboardNote != nil { grid.adoptFromDisk(key: key, notes: notes) }
+        if dashboardOpen { grid.adoptFromDisk(key: key, notes: notes) }
     }
 
     /// A note missing from its file was deleted by somebody else only if Tack last knew it with words in it: an empty note is never stored (`Note.isDeletion`), so one dragged before being typed in, or just emptied, is missing because Tack saved it so, and hiding it would pull it from under the caret.
@@ -470,7 +457,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// save kept words from the file over the ones on screen.
     private func cascade(key: String, note: Note) {
         shown(key: key, id: note.id)?.note.window.applyLive(note)
-        if dashboardNote != nil { grid.update(key: key, note: note) }
+        if dashboardOpen { grid.update(key: key, note: note) }
     }
 
     // MARK: - Notes elsewhere in this app
@@ -504,6 +491,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private static let elsewhereTag = 7701
 
     func menuNeedsUpdate(_ menu: NSMenu) {
+        DebugLog.note("menu: opened; front=\(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "-") policy=\(NSApp.activationPolicy().rawValue) active=\(NSApp.isActive) current=\(current?.focusKey ?? "nil")")
         refreshElsewhere()
         menu.items.filter { $0.tag == Self.elsewhereTag }.forEach(menu.removeItem)
         guard let elsewhere, !elsewhere.places.isEmpty else { return }
@@ -542,7 +530,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - Dashboard
 
-    /// Every note at once. Built the first time the dashboard opens.
+    /// Every note at once — what the Tack window shows. Built the first time it opens.
     private(set) lazy var grid: NoteGrid = {
         let grid = NoteGrid { [weak self] error in self?.reportPersistenceError(error) }
         grid.onLiveEdit = { [weak self] key, edited in
@@ -555,85 +543,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 hit.note.window.applyLive(edited)
             }
         }
-        // The dashboard floats over everything: left up, it would hide the app it just brought
-        // forward. It turns back into its note, and the poll shows that app's notes as usual.
-        grid.onReveal = { [weak self] in self?.closeDashboard() }
-        grid.onChange = { [weak self] in
-            guard let self, let host = dashboardNote else { return }
-            host.setDashboardColors(self.grid.colors)
-        }
         return grid
     }()
 
-    /// The note that is the dashboard right now, if one is.
-    private weak var dashboardNote: NoteWindow?
-    /// The dashboard's other page, built the first time it is asked for.
-    private lazy var settingsPage = SettingsView()
-    private var onSettingsPage = false
+    private lazy var dashboard: DashboardWindow = {
+        let dashboard = DashboardWindow(grid: grid)
+        dashboard.onClose = { [weak self] in self?.refreshElsewhere() }  // notes may have gone there
+        return dashboard
+    }()
 
-    /// Becomes the dashboard when it is opened from the menu bar with no note on screen to grow.
-    private lazy var looseNote = NoteWindow()
+    /// The Tack window is up, so the grid has to keep pace with the disk and the floating notes.
+    /// Never builds the window just to ask.
+    private var dashboardBuilt = false
+    private var dashboardOpen: Bool { dashboardBuilt && dashboard.isOpen }
 
-    /// `note` becomes the dashboard — or, from the menu bar, a note of the app in front, or a
-    /// bare card when that app shows none. A dashboard already up just comes forward.
-    func openDashboard(from note: NoteWindow?) {
-        if let current = dashboardNote, current.isExpanded {
-            NSApp.activate(ignoringOtherApps: true)
-            return
-        }
-        flushAll()  // the grid is about to read disk
-        let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
-        // A note still shrinking back from the last dashboard can't grow into the next one yet.
-        let candidates = [note, places[front]?.notes.first?.window, looseNote]
-        guard let host = candidates.compactMap({ $0 }).first(where: { !$0.isExpanded }) else { return }
-        grid.reload()
-        host.onCollapse = { [weak self] in self?.closeDashboard() }
-        host.onDashboardPress = { [weak self] in self?.grid.unfocus() }
-        host.onSettings = { [weak self, weak host] in
-            guard let self, let host else { return }
-            onSettingsPage.toggle()
-            host.showPage(onSettingsPage ? settingsPage : grid.view, settings: onSettingsPage)
-        }
-        onSettingsPage = false
-        host.expand(showing: grid.view, to: dashboardFrame(near: host.frame), color: Self.dashboardColor)
-        dashboardNote = host
-        host.setDashboardColors(grid.colors)
-    }
-
-    func closeDashboard() {
-        guard let host = dashboardNote else { return }
-        refreshElsewhere()  // notes may have been deleted there
-        grid.flush()
-        UserDefaults.standard.set(NSStringFromRect(host.frame), forKey: Self.dashboardFrameKey)
-        dashboardNote = nil
-        host.collapse()
-    }
-
-    private static let dashboardFrameKey = "dashboardFrame"
-
-    /// Where the dashboard opens: where it was last left, while that is still on a screen;
-    /// otherwise 760×560 in the middle of the screen `near` is on.
-    private func dashboardFrame(near: NSRect) -> NSRect {
-        if let saved = UserDefaults.standard.string(forKey: Self.dashboardFrameKey) {
-            let frame = NSRectFromString(saved)
-            if NSScreen.screens.contains(where: { $0.visibleFrame.intersects(frame) }) { return frame }
-        }
-        let screen = NSScreen.screens.first { $0.frame.intersects(near) } ?? NSScreen.main
-        let area = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let size = NSSize(width: min(760, area.width - 40), height: min(560, area.height - 40))
-        return NSRect(
-            x: area.midX - size.width / 2, y: area.midY - size.height / 2,
-            width: size.width, height: size.height)
-    }
-
-    /// The dashboard's background, solid — what a growing note washes to. Read in the light
-    /// appearance the cards are always drawn in, so the two never clash.
-    private static var dashboardColor: NSColor {
-        var color = NSColor.windowBackgroundColor
-        NSAppearance(named: .aqua)?.performAsCurrentDrawingAppearance {
-            color = color.usingColorSpace(.sRGB) ?? color
-        }
-        return color
+    /// Bring up the Tack window on every note — or, already up, bring it forward.
+    func openDashboard() {
+        if !dashboardOpen { flushAll() }  // the grid is about to read disk
+        dashboardBuilt = true
+        dashboard.open()
     }
 
     func reportPersistenceError(_ error: Error) {

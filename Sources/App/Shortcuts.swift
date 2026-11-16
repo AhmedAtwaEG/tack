@@ -34,9 +34,19 @@ extension AppDelegate {
         let editItem = NSMenuItem()
         editItem.title = "Edit"
         editItem.submenu = edit
+        // Never seen — Tack is a menu-bar agent — but its shortcuts still work while Tack is
+        // active: ⌘W and ⌘M are what anyone tries on the Tack window. Not `NSApp.windowsMenu`,
+        // which would list every floating note too.
+        let window = NSMenu(title: "Window")
+        window.addItem(NSMenuItem(title: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m"))
+        window.addItem(NSMenuItem(title: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w"))
+        let windowItem = NSMenuItem()
+        windowItem.title = "Window"
+        windowItem.submenu = window
         let main = NSMenu()
         main.addItem(appItem)
         main.addItem(editItem)
+        main.addItem(windowItem)
         NSApp.mainMenu = main
     }
 }

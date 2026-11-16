@@ -54,8 +54,6 @@ enum SelfTest {
         dashboardBackdrop()
         mergeKeepsNewerFile()
         emptyNoteSurvivesItsOwnSave()
-        updateVersions()
-        updateReleaseParsing()
         treePathIsRemembered()
         notePreferencesPalette()
         fontFaces()
@@ -66,6 +64,7 @@ enum SelfTest {
         newNotesRememberTheApp()
         dashboardGroups()
         dashboardSearch()
+        dashboardPlacement()
         print("✅ all self-tests passed")
     }
 
@@ -850,36 +849,6 @@ extension SelfTest {
         }
     }
 
-    static func updateVersions() {
-        assert(Updater.isNewer("1.10.0", than: "1.9.2"), "versions compare as numbers, not text")
-        assert(Updater.isNewer("v1.7.0", than: "1.6.0"), "a tag's v is ignored")
-        assert(Updater.isNewer("2.0.0", than: "1.99.99"), "major wins")
-        assert(!Updater.isNewer("1.6.0", than: "1.6.0"), "the same version is no update")
-        assert(!Updater.isNewer("1.7", than: "1.7.0"), "a missing part is 0")
-        assert(!Updater.isNewer("1.5.9", than: "1.6.0"), "an older release is no update")
-        assert(Updater.isNewer("0.0.1", than: "garbage"), "an unreadable installed version is 0.0.0")
-    }
-
-    static func updateReleaseParsing() {
-        let json = Data("""
-            {"tag_name": "v1.7.0", "html_url": "https://github.com/o/r/releases/tag/v1.7.0",
-             "assets": [
-               {"name": "Tack-v1.7.0-intel.zip", "browser_download_url": "https://x/intel.zip"},
-               {"name": "Tack-v1.7.0-apple-silicon.zip", "browser_download_url": "https://x/arm.zip"}]}
-            """.utf8)
-        let arm = try! Updater.release(from: json, appleSilicon: true)
-        assert(arm?.version == "1.7.0", "the version drops the tag's v: \(String(describing: arm))")
-        assert(arm?.download.absoluteString == "https://x/arm.zip", "Apple silicon gets its own zip")
-        let intel = try! Updater.release(from: json, appleSilicon: false)
-        assert(intel?.download.absoluteString == "https://x/intel.zip", "Intel gets its own zip")
-
-        let half = Data(#"{"tag_name": "v1.8.0", "html_url": "https://x", "assets": []}"#.utf8)
-        assert(try! Updater.release(from: half, appleSilicon: true) == nil, "no zip yet is no update")
-
-        let repo = Data(#"{"name": "tack", "stargazers_count": 42, "forks_count": 3}"#.utf8)
-        assert(try! Updater.stars(from: repo) == 42, "the star count comes from stargazers_count")
-    }
-
     /// Issue #13: a save must not write the old words over a file a script has rewritten.
     static func mergeKeepsNewerFile() {
         let seen = Note(text: "old", dx: 1, dy: 1)
@@ -1361,6 +1330,22 @@ extension SelfTest {
         assert(prefs.pinsAppWide("a") && prefs.pinsAppWide("b"), "each app remembers its own")
         prefs.setPinsAppWide("a", false)
         assert(!prefs.pinsAppWide("a") && prefs.pinsAppWide("b"), "and forgets only its own")
+    }
+
+    static func dashboardPlacement() {
+        let left = NSRect(x: 0, y: 0, width: 1440, height: 875)
+        let right = NSRect(x: 1440, y: 0, width: 1920, height: 1055)
+        let left_ = NSRect(x: 100, y: 100, width: 760, height: 560)
+        assert(DashboardWindow.placed(left_, on: left) == left_, "on the same display it stays where it was left")
+        let moved = DashboardWindow.placed(left_, on: right)
+        assert(moved.size == left_.size, "to another display it keeps its size")
+        assert(moved.midX == right.midX && moved.midY == right.midY, "centred there: \(moved)")
+        let huge = NSRect(x: 0, y: 0, width: 1800, height: 1000)
+        let small = NSRect(x: 2000, y: 0, width: 800, height: 600)
+        let fitted = DashboardWindow.placed(huge, on: small)
+        assert(small.contains(fitted), "shrunk to fit a smaller display: \(fitted)")
+        let straddling = NSRect(x: 1300, y: 100, width: 760, height: 560)  // mostly on the right one
+        assert(DashboardWindow.placed(straddling, on: right) == straddling, "its centre's display is its own")
     }
 
     static func dashboardGroups() {

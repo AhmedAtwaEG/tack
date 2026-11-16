@@ -127,8 +127,8 @@ final class NoteEditor: NSObject, NSTextViewDelegate {
 /// been clicked — the wheel goes on to whatever holds it, so the dashboard scrolls as a whole
 /// instead of catching on every note the cursor crosses.
 ///
-/// And it runs edge to edge. What it shows starts below `topBand` — the strip the note or the
-/// dashboard is dragged by — but scrolls up under it to the very top, fading out on the way,
+/// And it runs edge to edge. What it shows starts below `topBand` — the strip the note is
+/// dragged by — but scrolls up under it to the very top, fading out on the way,
 /// and fades out the same way at the bottom. Before, it ended in a hard line under the strip
 /// while the bottom ran to the border, and the two edges looked like different things.
 final class FocusScrollView: NSScrollView {
