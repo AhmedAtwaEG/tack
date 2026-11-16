@@ -10,10 +10,13 @@ final class NoteGrid: NSObject {
     /// The dashboard's top strip, which it is dragged by and the pill sits in.
     static let strip: CGFloat = 30
 
-    /// The scrolling grid, to mount in whatever note is showing the dashboard — over the whole
-    /// card, strip included.
-    let view: FocusScrollView
+    /// The dashboard's page: the search field in the strip over the scrolling grid. Mount it in
+    /// whatever note is showing the dashboard — over the whole card, strip included.
+    let view: NSView = PassThroughView(frame: NSRect(x: 0, y: 0, width: 760, height: 520))
+    private let scroll: FocusScrollView
     private let wrap = WrapView()
+    /// Narrows the grid to the notes whose words, app or place contain what is typed.
+    private let search = NSSearchField()
     private var cells: [NoteGridCell] = []
     /// The card last clicked: the one that scrolls its own text, and sits lifted off the rest.
     private weak var focused: NoteGridCell?
@@ -42,18 +45,71 @@ final class NoteGrid: NSObject {
 
     init(onError: @escaping (Error) -> Void) {
         self.onError = onError
-        view = FocusScrollView(frame: NSRect(x: 0, y: 0, width: 760, height: 520))
-        view.topBand = Self.strip  // cards scroll up under the strip the dashboard is dragged by
-        view.bottomFade = 16
-        view.autoresizingMask = [.width, .height]
-        view.drawsBackground = false
+        scroll = FocusScrollView(frame: NSRect(x: 0, y: 0, width: 760, height: 520))
+        scroll.topBand = Self.strip  // cards scroll up under the strip the dashboard is dragged by
+        scroll.bottomFade = 16
+        scroll.autoresizingMask = [.width, .height]
+        scroll.drawsBackground = false
         // No scroller to see: the wheel and the trackpad still scroll, like a note's own text.
-        view.hasVerticalScroller = false
-        wrap.frame = NSRect(origin: .zero, size: view.contentSize)
+        scroll.hasVerticalScroller = false
+        wrap.frame = NSRect(origin: .zero, size: scroll.contentSize)
         wrap.autoresizingMask = [.width]  // the clip view owns the width; layout() sets the height
-        view.documentView = wrap
+        scroll.documentView = wrap
+        view.autoresizingMask = [.width, .height]
+        view.addSubview(scroll)
+        // In the strip's left end; the pill has its right end. The rest of the strip still drags.
+        search.placeholderString = "Search notes"
+        search.controlSize = .small
+        search.font = .systemFont(ofSize: 11)
+        search.sendsSearchStringImmediately = true
+        search.frame = NSRect(x: 12, y: view.bounds.height - Self.strip + 5, width: 200, height: 20)
+        search.autoresizingMask = [.minYMargin]
+        view.addSubview(search)
         super.init()
         wrap.onPress = { [weak self] in self?.unfocus() }
+        search.target = self
+        search.action = #selector(searchChanged)
+    }
+
+    @objc private func searchChanged() { applyFilter() }
+
+    /// Show only the cards that match the search, and only the headings that still head one.
+    private func applyFilter() {
+        let query = search.stringValue
+        for cell in cells {
+            cell.isHidden = !Self.matches(query, cell.searchText)
+        }
+        let shownKeys = Set(cells.filter { !$0.isHidden }.map(\.key))
+        let shownApps = Set(shownKeys.map(Self.app(of:)))
+        for heading in wrap.subviews.compactMap({ $0 as? GridHeading }) {
+            heading.isHidden = heading.key.map { !shownKeys.contains($0) } ?? !shownApps.contains(heading.app)
+        }
+        wrap.needsLayout = true
+    }
+
+    /// Every word typed appears somewhere in `text`, ignoring case and accents. Pure.
+    static func matches(_ query: String, _ text: String) -> Bool {
+        query.split(whereSeparator: \.isWhitespace).allSatisfy {
+            text.range(of: $0, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+        }
+    }
+
+    static func app(of key: String) -> String { key.components(separatedBy: "|")[0] }
+
+    /// The notes grouped the way the grid shows them: by app, then by place, each in the order
+    /// it first appears. Keyed by bundle ID, not by sort order — "com.foo.bar" sorts between
+    /// "com.foo" and "com.foo|x", so a sorted list alone would split an app in two. Pure.
+    static func groups(_ stored: [StoredNote]) -> [(app: String, places: [(key: String, notes: [StoredNote])])] {
+        var apps: [String] = []
+        var places: [String: [String]] = [:]
+        var notes: [String: [StoredNote]] = [:]
+        for s in stored {
+            let app = app(of: s.key)
+            if places[app] == nil { apps.append(app); places[app] = [] }
+            if notes[s.key] == nil { places[app]!.append(s.key); notes[s.key] = [] }
+            notes[s.key]!.append(s)
+        }
+        return apps.map { app in (app, places[app]!.map { ($0, notes[$0]!) }) }
     }
 
     /// Put down whichever card is lifted, and end its editing — a click anywhere off the cards.
@@ -76,13 +132,28 @@ final class NoteGrid: NSObject {
             return
         }
         defer { onChange?() }
+        wrap.subviews.filter { $0 is GridHeading }.forEach { $0.removeFromSuperview() }
+        search.stringValue = ""  // every opening starts on every note
         guard !stored.isEmpty else {
             setPlaceholder(true)
             wrap.needsLayout = true
             return
         }
-        stored.forEach { add(NoteGridCell(stored: $0)) }
+        for group in Self.groups(stored) {
+            wrap.addSubview(heading(app: group.app, key: nil))
+            for place in group.places {
+                wrap.addSubview(heading(app: group.app, key: place.key))
+                place.notes.forEach { add(NoteGridCell(stored: $0)) }
+            }
+        }
         wrap.needsLayout = true
+    }
+
+    private func heading(app: String, key: String?) -> GridHeading {
+        GridHeading(app: app, key: key) { [weak self] key in
+            guard Container.reveal(key: key) else { return }
+            self?.onReveal?()
+        }
     }
 
     /// A note changed in its floating window while the dashboard is up. Keystrokes arrive here
@@ -101,11 +172,40 @@ final class NoteGrid: NSObject {
         }
         // A note made after the dashboard was opened. Showing nothing would be a quiet lie.
         guard !note.isDeletion else { return }
-        add(NoteGridCell(stored: StoredNote(key: key, note: note)))
+        add(NoteGridCell(stored: StoredNote(key: key, note: note)), placed: true)
+        applyFilter()
+    }
+
+    /// `placed`: put the cell with its place's other cards, adding the place's heading — and
+    /// its app's — when it is the first there. Otherwise it goes last, as a reload builds it.
+    private func add(_ cell: NoteGridCell, placed: Bool = false) {
+        if placed { return place(cell) }
+        configure(cell)
+        wrap.addSubview(cell)
+    }
+
+    private func place(_ cell: NoteGridCell) {
+        configure(cell)
+        let app = Self.app(of: cell.key)
+        let views = wrap.subviews
+        func belongs(_ v: NSView) -> Bool {
+            (v as? NoteGridCell).map { Self.app(of: $0.key) == app } ?? ((v as? GridHeading)?.app == app)
+        }
+        if let last = views.last(where: { ($0 as? NoteGridCell)?.key == cell.key }) {
+            wrap.addSubview(cell, positioned: .above, relativeTo: last)
+        } else if let last = views.last(where: belongs) {
+            let heading = heading(app: app, key: cell.key)
+            wrap.addSubview(heading, positioned: .above, relativeTo: last)
+            wrap.addSubview(cell, positioned: .above, relativeTo: heading)
+        } else {
+            wrap.addSubview(heading(app: app, key: nil))
+            wrap.addSubview(heading(app: app, key: cell.key))
+            wrap.addSubview(cell)
+        }
         wrap.needsLayout = true
     }
 
-    private func add(_ cell: NoteGridCell) {
+    private func configure(_ cell: NoteGridCell) {
         cell.onError = onError
         cell.onDelete = { [weak self] cell in self?.drop(cell) }
         cell.onLiveEdit = { [weak self] key, note in
@@ -116,7 +216,6 @@ final class NoteGrid: NSObject {
         cell.onPress = { [weak self, weak cell] in self?.focus(cell) }
         setPlaceholder(false)
         cells.append(cell)
-        wrap.addSubview(cell)
     }
 
     /// Every note key the grid shows.
@@ -156,6 +255,12 @@ final class NoteGrid: NSObject {
     private func drop(_ cell: NoteGridCell) {
         cells.removeAll { $0 === cell }
         cell.removeFromSuperview()
+        // A heading with nothing left under it goes too: the place's, then the app's.
+        let keys = Set(cells.map(\.key))
+        for heading in wrap.subviews.compactMap({ $0 as? GridHeading }) {
+            let empty = heading.key.map { !keys.contains($0) } ?? !keys.contains { Self.app(of: $0) == heading.app }
+            if empty { heading.removeFromSuperview() }
+        }
         setPlaceholder(cells.isEmpty)
         wrap.needsLayout = true
         onChange?()
@@ -202,7 +307,20 @@ private final class WrapView: NSView {
         super.layout()
         let gap = Self.gap
         var x = gap, y = gap, rowHeight: CGFloat = 0
-        for sub in subviews {
+        for sub in subviews where !sub.isHidden {
+            // A heading takes a line of its own, the full width; an app's sets off a new group.
+            if let heading = sub as? GridHeading {
+                if x > gap {
+                    y += rowHeight + gap
+                    rowHeight = 0
+                }
+                if heading.key == nil, y > gap { y += 8 }
+                x = gap
+                heading.setFrameSize(NSSize(width: bounds.width - gap * 2, height: heading.frame.height))
+                place(heading, at: NSPoint(x: x, y: y))
+                y += heading.frame.height + 6
+                continue
+            }
             if x > gap, x + sub.frame.width > bounds.width - gap {
                 x = gap
                 y += rowHeight + gap
@@ -241,10 +359,8 @@ private final class WrapView: NSView {
     }
 }
 
-/// One note in the grid: where it lives, above a live card of it.
+/// One note in the grid: a live card of it, under its place's heading.
 private final class NoteGridCell: NSView {
-    private static let headerGap: CGFloat = 4
-
     private let card: NoteCard
     private var stored: StoredNote
     private let saver = Debouncer(delay: 0.5)  // one per cell: a shared one would cancel its peers
@@ -257,6 +373,10 @@ private final class NoteGridCell: NSView {
 
     var key: String { stored.key }
     var noteID: String? { stored.note.id }
+    /// What the dashboard's search looks through: the words, and where the note lives.
+    var searchText: String {
+        "\(card.editor.markdown) \(Container.label(for: key)) \(Container.scopeName(for: key))"
+    }
 
     /// The colour the card shows now, previews aside — edits included before they are saved.
     var colorHex: String { card.styler.colorHex }
@@ -265,11 +385,7 @@ private final class NoteGridCell: NSView {
         self.stored = stored
         let size = Self.size(of: stored.note)
         card = NoteCard(size: size, blending: .withinWindow)
-        let header = Self.header(for: stored.key, width: size.width - 4)
-        super.init(
-            frame: NSRect(
-                x: 0, y: 0, width: size.width,
-                height: size.height + header.frame.height + Self.headerGap))
+        super.init(frame: NSRect(origin: .zero, size: size))
 
         // Only the card in focus scrolls its own text; the others hand the wheel to the grid.
         card.editor.view.scrollsItself = false
@@ -278,8 +394,6 @@ private final class NoteGridCell: NSView {
         card.view.frame = NSRect(origin: .zero, size: size)
         card.view.autoresizingMask = []  // cells don't resize; the note keeps the size it has
         addSubview(card.view)
-        header.setFrameOrigin(NSPoint(x: 2, y: size.height + Self.headerGap))
-        addSubview(header)
         card.load(stored.note)
         card.onEdit = { [weak self] in self?.scheduleSave() }
         card.onDelete = { [weak self] in self?.deleteConfirmed() }
@@ -358,27 +472,6 @@ private final class NoteGridCell: NSView {
         return NSSize(width: max(w, floor.width), height: max(h, floor.height))
     }
 
-    /// Which app, and which window, tab or folder inside it — wrapped over as many lines as the
-    /// path needs, so none of it ends in an ellipsis. The full key stays the tooltip.
-    private static func header(for key: String, width: CGFloat) -> NSTextField {
-        let text = "\(Container.scopeName(for: key)) · \(Container.label(for: key))"
-        let label = NSTextField(wrappingLabelWithString: text)
-        label.isSelectable = false
-        label.toolTip = key
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.lineBreakMode = .byCharWrapping  // a URL has no spaces to break at
-        label.attributedStringValue = NSAttributedString(
-            string: text,
-            attributes: [
-                .font: NSFont.systemFont(ofSize: 11), .paragraphStyle: paragraph,
-                .foregroundColor: NSColor.secondaryLabelColor,
-            ])
-        let bounds = NSRect(x: 0, y: 0, width: width, height: .greatestFiniteMagnitude)
-        let height = label.cell?.cellSize(forBounds: bounds).height ?? 16
-        label.frame = NSRect(x: 2, y: 0, width: width, height: ceil(height))
-        return label
-    }
-
     // MARK: - Saving
 
     /// The note as this card shows it now — what a save would write.
@@ -431,4 +524,69 @@ private final class NoteGridCell: NSView {
         onLiveEdit(stored.key, deletion)  // and its floating twin goes with it
         onDelete(self)
     }
+}
+
+/// The dashboard's page: lets every click through that none of its own views take — the strip
+/// behind the search field still drags the dashboard.
+private final class PassThroughView: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let hit = super.hitTest(point)
+        return hit === self ? nil : hit
+    }
+}
+
+/// A full-width line in the grid: an app — its icon and name — or one place inside it, with
+/// a button that goes there.
+private final class GridHeading: NSView {
+    let app: String
+    /// The place this heads; nil for the app's own heading.
+    let key: String?
+
+    init(app: String, key: String?, onGo: @escaping (String) -> Void) {
+        self.app = app
+        self.key = key
+        super.init(frame: NSRect(x: 0, y: 0, width: 400, height: key == nil ? 22 : 18))
+        let label = NSTextField(labelWithString: "")
+        label.lineBreakMode = .byTruncatingMiddle
+        label.autoresizingMask = [.width]
+        var x: CGFloat = 0
+        if let key {
+            let scope = Container.scopeName(for: key)
+            label.stringValue = scope == "App" ? "Whole app" : "\(scope) · \(Container.placeName(for: key))"
+            label.toolTip = key
+            label.font = .systemFont(ofSize: 11)
+            label.textColor = .secondaryLabelColor
+            let go = NSButton(title: "Go to", target: nil, action: nil)
+            go.isBordered = false
+            go.font = .systemFont(ofSize: 11, weight: .medium)
+            go.contentTintColor = .controlAccentColor
+            go.image = NSImage(systemSymbolName: "arrow.up.forward", accessibilityDescription: nil)?
+                .withSymbolConfiguration(.init(pointSize: 9, weight: .semibold))
+            go.imagePosition = .imageTrailing
+            go.toolTip = "Bring this \(scope == "App" ? "app" : scope.lowercased()) to the front"
+            go.sizeToFit()
+            go.frame = NSRect(x: bounds.width - go.frame.width, y: 0, width: go.frame.width, height: 18)
+            go.autoresizingMask = [.minXMargin]
+            addSubview(go)
+            onGoAction = { onGo(key) }
+            go.target = self
+            go.action = #selector(goTapped)
+            label.frame = NSRect(x: x, y: 1, width: bounds.width - go.frame.width - 8, height: 16)
+        } else {
+            let icon = NSImageView(image: Container.revealIcon(for: app))
+            icon.frame = NSRect(x: 0, y: 1, width: 20, height: 20)
+            addSubview(icon)
+            x = 26
+            label.stringValue = Container.appName(bundleID: app)
+            label.font = .systemFont(ofSize: 13, weight: .semibold)
+            label.textColor = .labelColor
+            label.frame = NSRect(x: x, y: 2, width: bounds.width - x, height: 18)
+        }
+        addSubview(label)
+    }
+
+    required init?(coder: NSCoder) { fatalError("not from a nib") }
+
+    private var onGoAction: () -> Void = {}
+    @objc private func goTapped() { onGoAction() }
 }

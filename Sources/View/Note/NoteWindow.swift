@@ -123,8 +123,18 @@ final class NoteWindow: NSObject, NSWindowDelegate {
     ) {
         pinChoices = choices
         onPickLevel = onPick
-        card.pill.setPinLevels(choices, current: current)
+        showLevel(current)
     }
+
+    /// The pill rings `level`, and the place label names it.
+    private func showLevel(_ level: Int) {
+        card.pill.setPinLevels(pinChoices, current: level)
+        let chosen = pinChoices.first { $0.level == level }
+        card.setPlace(chosen?.place, symbol: chosen?.symbol)
+    }
+
+    /// A new note draws the eye to where it was pinned.
+    func pulsePlace() { card.pulsePlace() }
 
     /// A re-pin had to give the note a fresh id (its old one was taken at the new level).
     func adoptID(_ id: String?) { noteID = id }
@@ -136,7 +146,7 @@ final class NoteWindow: NSObject, NSWindowDelegate {
     private func pick(level: Int) {
         guard saver.flush() else { return }  // never move an older version after a failed save
         guard onPickLevel(level) else { return }
-        card.pill.setPinLevels(pinChoices, current: level)  // the picker rings the new level
+        showLevel(level)  // the picker rings the new level, the label names it
     }
 
     // MARK: - Show / hide

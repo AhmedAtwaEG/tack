@@ -47,6 +47,28 @@ enum AXWindows {
         return (value as! AXUIElement)
     }
 
+    /// What names a window to Tack: its document, else its title. An empty document (Electron
+    /// reports one) falls through to the title rather than ending the lookup there.
+    static func identity(of win: AXUIElement) -> String? {
+        [kAXDocumentAttribute, kAXTitleAttribute].lazy
+            .compactMap { string(win, $0) }.first { !$0.isEmpty }
+    }
+
+    /// Bring forward `pid`'s window named `ident` (see `identity`). False when no open window
+    /// has that name — closed, on another tab, or a chat the app shows inside one window.
+    static func raise(pid: pid_t, ident: String) -> Bool {
+        guard AXIsProcessTrusted() else { return false }
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)  // see focusedWindow
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value) == .success,
+            let windows = value as? [AXUIElement],
+            let win = windows.first(where: { identity(of: $0) == ident })
+        else { return false }
+        AXUIElementSetAttributeValue(win, kAXMainAttribute as CFString, kCFBooleanTrue)
+        return AXUIElementPerformAction(win, kAXRaiseAction as CFString) == .success
+    }
+
     static func string(_ el: AXUIElement, _ attr: String) -> String? {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(el, attr as CFString, &value) == .success else {

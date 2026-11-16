@@ -55,6 +55,28 @@ final class NotePreferences {
         defaults.set(list, forKey: Self.paletteKey)
     }
 
+    // MARK: - Pin level per app
+
+    private static let appWideKey = "appWidePins"
+
+    /// Apps whose new notes pin to the whole app: the last note you re-pinned there went to
+    /// the app, so the next one starts there too. Every other app pins to the window or tab.
+    func pinsAppWide(_ bundleID: String) -> Bool {
+        (defaults.stringArray(forKey: Self.appWideKey) ?? []).contains(bundleID)
+    }
+
+    func setPinsAppWide(_ bundleID: String, _ appWide: Bool) {
+        var apps = Set(defaults.stringArray(forKey: Self.appWideKey) ?? [])
+        if appWide { apps.insert(bundleID) } else { apps.remove(bundleID) }
+        defaults.set(apps.sorted(), forKey: Self.appWideKey)
+    }
+
+    /// The level a new note starts at: the whole app where that is what you last chose and the
+    /// surface offers it, the finest level otherwise. Pure, for `--selftest`.
+    static func newNoteLevel(pinLevels: [Int], finest: Int, appWide: Bool) -> Int {
+        appWide && pinLevels.contains(0) ? 0 : finest
+    }
+
     // MARK: - Finder notes
 
     // ponytail: Finder notes live in a .tack.json inside their own folder, with no index

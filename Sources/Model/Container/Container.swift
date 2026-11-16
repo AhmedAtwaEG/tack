@@ -165,6 +165,23 @@ extension Container {
         return rest.isEmpty ? app : "\(app) — \(rest)"
     }
 
+    /// Just the place, without its app: "Projects", "example.com/page", "Report.pdf" — or the
+    /// app's own name for a note on the whole app. A window title's trailing " - App" goes:
+    /// next to the app's name it only repeats it. `appName` is passed in so this stays pure.
+    static func placeName(for key: String, appName: String) -> String {
+        let parts = key.components(separatedBy: "|")
+        guard parts.count > 1, let last = parts.last else { return appName }
+        let place = detail(last)
+        for dash in [" - ", " — ", " – "] where place.hasSuffix(dash + appName) && place.count > (dash + appName).count {
+            return String(place.dropLast((dash + appName).count))
+        }
+        return place
+    }
+
+    static func placeName(for key: String) -> String {
+        placeName(for: key, appName: appName(bundleID: key.components(separatedBy: "|")[0]))
+    }
+
     /// Which scope the key attaches to. ponytail: the key doesn't record its level, so this is
     /// inferred from the bundle ID — store the level beside the note if a third tab-style app
     /// ever needs telling apart.
@@ -192,6 +209,7 @@ extension Container {
     enum RevealTarget: Equatable {
         case folder(String)  // a Finder window on this path
         case url(URL)  // this page, in the browser the note was written on
+        case window(String)  // the app's window with this title or document, if it has one open
         case app  // just bring the app forward
     }
 
@@ -204,6 +222,9 @@ extension Container {
             url.scheme?.hasPrefix("http") == true {
             return .url(url)
         }
+        // A plain app's window, keyed by its title or document. A Terminal tab is keyed by its
+        // tty, which no window is named after.
+        if parts.count == 2, parts[0] != TerminalContainer.bundleID, !parts[1].isEmpty { return .window(parts[1]) }
         return .app
     }
 
@@ -225,9 +246,11 @@ extension Container {
     /// Bring the surface a note belongs to back to the front. The note follows on its own: the
     /// poll notices the focus change and shows whatever is pinned there.
     ///
-    /// ponytail: a browser gets the URL (its own tab if it already has one, a new tab if not)
-    /// and everything else just comes forward — picking a particular window or Terminal tab
-    /// needs AX or an Apple event per app. Add that if landing on the wrong one starts to sting.
+    /// A browser gets the URL (its own tab if it already has one, a new tab if not); a plain
+    /// app's window is raised by its title. A window Tack can't find — closed, or a chat inside
+    /// one window that only the app itself can switch to — leaves the app in front and a hint
+    /// saying what to look for.
+    /// ponytail: a Terminal tab just brings Terminal forward; picking the tab needs an Apple event.
     @discardableResult static func reveal(key: String) -> Bool {
         let bundleID = key.components(separatedBy: "|")[0]
         guard let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID)
@@ -242,9 +265,31 @@ extension Container {
             NSWorkspace.shared.open([url], withApplicationAt: app, configuration: config)
         case .app:
             NSWorkspace.shared.openApplication(at: app, configuration: config)
+        case .window(let ident):
+            let place = placeName(for: key)
+            NSWorkspace.shared.openApplication(at: app, configuration: config) { running, _ in
+                DispatchQueue.main.async {
+                    guard let pid = running?.processIdentifier, !AXWindows.raise(pid: pid, ident: ident)
+                    else { return }
+                    Hint.show("Open “\(place)” in \(appName(bundleID: bundleID)) to see this note")
+                }
+            }
         }
         return true
     }
+
+    /// The places of `bundleID` that hold notes, other than the ones `shown` — how many notes
+    /// each. For "notes elsewhere in this app". Pure: the caller reads the stores.
+    static func elsewhere(in notes: [String: Int], bundleID: String, shown: Set<String>) -> [(key: String, count: Int)] {
+        notes.filter { key, count in
+            count > 0 && key.components(separatedBy: "|")[0] == bundleID && !shown.contains(key)
+        }
+        .map { (key: $0.key, count: $0.value) }
+        .sorted { $0.key.lowercased() < $1.key.lowercased() }
+    }
+
+    /// Every key this surface's notes can be stored under, coarse to fine.
+    var allKeys: Set<String> { Set((minLevel...max(minLevel, finestLevel)).map { key(at: $0) }) }
 
     /// A path component as a person would read it: folders and ttys by their last component,
     /// URLs without the scheme, window titles as they are.

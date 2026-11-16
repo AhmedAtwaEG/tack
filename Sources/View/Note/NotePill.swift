@@ -58,8 +58,14 @@ final class NotePill: NSObject {
         }
     }
 
-    /// One place a note can be pinned: its level, the menu wording, and the symbol its dot wears.
-    typealias PinChoice = (level: Int, label: String, symbol: String)
+    /// One place a note can be pinned: its level, the menu wording, the symbol its dot wears, and
+    /// the place itself as a person names it ("Slack", "#design", "example.com/page").
+    typealias PinChoice = (level: Int, label: String, symbol: String, place: String)
+
+    /// The name of the dot under the cursor, shown under the pill. A tooltip would do this, but
+    /// macOS shows tooltips only for the active app — and Tack almost never is: you hover a
+    /// note while working in the app it is pinned to. Mount it in the card next to the pill.
+    let caption = PillCaption()
 
     private let styler: NoteStyler  // read-only: what is currently chosen
     private let fontDot: NSButton  // wears a "T" in the note's face; opens the face picker
@@ -201,6 +207,7 @@ final class NotePill: NSObject {
         view.onHover = { [weak self] inside in
             guard let self else { return }
             if !inside {
+                caption.show(nil, under: view.frame)
                 // Only the resting dots follow the cursor away. A picker is a question already
                 // asked: it stays up until it's answered, or until a click on the card drops it —
                 // but whatever it was previewing goes back.
@@ -210,7 +217,24 @@ final class NotePill: NSObject {
                 set(.open)
             }
         }
+        view.onMove = { [weak self] point in
+            guard let self else { return }
+            let dot = shownDots().first { !$0.isHidden && $0.frame.contains(point) }
+            caption.show(dot.flatMap(Self.name(of:)), under: view.frame)
+        }
         refreshDots()
+    }
+
+    /// What a dot says it does. A swatch's name is its hex, which says nothing its colour doesn't.
+    private static func name(of dot: NSButton) -> String? {
+        dot is ColorSwatchButton ? nil : dot.toolTip
+    }
+
+    /// Open the pin-level picker — for the place label on the card, which is the note saying
+    /// where it is pinned, and the obvious thing to click to change that.
+    func openPinPicker() {
+        guard pinChoices.count > 1, !isDashboard else { return }
+        set(.pin)
     }
 
     /// The picker's way out: a click anywhere on the card drops whatever is open.
@@ -239,7 +263,7 @@ final class NotePill: NSObject {
         // Like the font and colour dots, the pin dot wears what is chosen: the current level.
         let chosen = choices.first { $0.level == current }
         pinDot.image = chosen.map { Self.symbolDot($0.symbol) }
-        pinDot.toolTip = chosen?.label
+        pinDot.toolTip = chosen.map { "Pinned to \($0.place) — change" }
         // Placed now, unanimated: the window is reused, and a delete dot left one slot over by
         // the previous note would otherwise slide into place the first time the pill opens.
         for (i, dot) in restingDots.enumerated() { dot.frame = Self.dotFrame(index: i) }
@@ -327,6 +351,7 @@ final class NotePill: NSObject {
     private func set(_ mode: Mode, animated: Bool = true) {
         guard mode != self.mode else { return }
         endPreview()  // read against the mode being left, before it changes
+        caption.show(nil, under: view.frame)  // the dot it named is about to move or go
         self.mode = mode
         let spent = choiceDots  // the picker dots the previous mode built; dropped once faded out
         switch mode {
@@ -424,7 +449,7 @@ final class NotePill: NSObject {
     /// like the chosen face and colour do. No hover preview: a level has nothing to show early.
     private func pinDots() -> [NSButton] {
         pinChoices.enumerated().map { i, choice in
-            let b = Self.dotButton(index: i, name: choice.label)
+            let b = Self.dotButton(index: i, name: "\(choice.label): \(choice.place)")
             b.image = Self.symbolDot(choice.symbol, borderWidth: choice.level == pinCurrent ? 2 : 1)
             b.tag = choice.level
             b.target = self
@@ -461,5 +486,45 @@ final class NotePill: NSObject {
         previewing = false  // a commit is not a preview to put back
         onColor(Swatch.color(fromHex: swatch.hex), true)
         set(.open)
+    }
+}
+
+/// The small label under the pill naming the dot the cursor is on (see `NotePill.caption`).
+/// Ignores the mouse: it only ever covers the note's text, never something to click.
+final class PillCaption: NSView {
+    private let label = NSTextField(labelWithString: "")
+    private static let pad = NSSize(width: 6, height: 2)
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.white.withAlphaComponent(0.92).cgColor
+        layer?.cornerRadius = 5
+        layer?.borderColor = NSColor.black.withAlphaComponent(0.08).cgColor
+        layer?.borderWidth = 1
+        label.font = .systemFont(ofSize: 10.5, weight: .medium)
+        label.textColor = NSColor.black.withAlphaComponent(0.8)
+        label.lineBreakMode = .byTruncatingTail
+        addSubview(label)
+        isHidden = true
+        autoresizingMask = [.minXMargin, .minYMargin]  // the pill's corner, whatever the card's size
+    }
+
+    required init?(coder: NSCoder) { fatalError("not from a nib") }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    /// Name a dot (nil: hide), right-aligned just under `pill`, cut short to fit the card.
+    func show(_ text: String?, under pill: NSRect) {
+        guard let text else { return isHidden = true }
+        label.stringValue = text
+        label.sizeToFit()
+        let width = min(label.frame.width + Self.pad.width * 2, max(40, pill.maxX - 6))
+        let height = label.frame.height + Self.pad.height * 2
+        frame = NSRect(x: pill.maxX - width, y: pill.minY - height - 3, width: width, height: height)
+        label.frame = NSRect(
+            x: Self.pad.width, y: Self.pad.height, width: width - Self.pad.width * 2,
+            height: label.frame.height)
+        isHidden = false
     }
 }

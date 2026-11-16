@@ -61,6 +61,11 @@ enum SelfTest {
         fontFaces()
         pillGeometry()
         dotGlyphsAreCentred()
+        placeNames()
+        notesElsewhere()
+        newNotesRememberTheApp()
+        dashboardGroups()
+        dashboardSearch()
         print("✅ all self-tests passed")
     }
 
@@ -137,7 +142,8 @@ enum SelfTest {
             == .url(URL(string: "https://example.com/page")!), "a tab note opens its page")
         assert(Container.revealTarget(for: "com.apple.Terminal|/dev/ttys003") == .app,
             "a tty is a path, not a page — Terminal just comes forward")
-        assert(Container.revealTarget(for: ghost + "|Draft") == .app, "a window note just raises its app")
+        assert(Container.revealTarget(for: ghost + "|Draft") == .window("Draft"), "a window note raises that window")
+        assert(Container.revealTarget(for: ghost + "|") == .app, "a window with no name: just the app")
         assert(Container.revealTarget(for: ghost) == .app, "an app note raises its app")
     }
 
@@ -1313,4 +1319,65 @@ extension SelfTest {
         let distinct = Set(taken.map { "\(Int($0.dx)),\(Int($0.dy))" })
         assert(distinct.count == 30, "thirty notes, thirty different spots: \(distinct.count)")
     }
+
+    static func placeNames() {
+        let slack = "com.tinyspeck.slackmacgap"
+        assert(Container.placeName(for: slack, appName: "Slack") == "Slack", "a whole-app note is named after the app")
+        assert(
+            Container.placeName(for: slack + "|design (Channel) - Acme - Slack", appName: "Slack") == "design (Channel) - Acme",
+            "a window title's trailing app name goes")
+        assert(Container.placeName(for: slack + "|Slack", appName: "Slack") == "Slack", "but not when it is the whole title")
+        assert(Container.placeName(for: "x|Report.pdf", appName: "Preview") == "Report.pdf", "a document reads as-is")
+        assert(
+            Container.placeName(for: FinderContainer.bundleID + "|/Users/me/Projects", appName: "Finder") == "Projects",
+            "a folder by its name")
+        assert(
+            Container.placeName(for: "com.google.Chrome|https://example.com/page?q=1", appName: "Chrome") == "example.com/page",
+            "a tab by its page")
+    }
+
+    static func notesElsewhere() {
+        let notes = ["a": 2, "a|chat1": 1, "a|chat2": 3, "a.helper|x": 1, "b|y": 4, "a|empty": 0]
+        let found = Container.elsewhere(in: notes, bundleID: "a", shown: ["a", "a|chat1"])
+        assert(found.map(\.key) == ["a|chat2"], "only the app's other places with notes: \(found)")
+        assert(found.first?.count == 3, "with how many each holds")
+        assert(Container.elsewhere(in: notes, bundleID: "c", shown: []).isEmpty, "an app with no notes has none elsewhere")
+        let c = FakeContainer(path: ["app", "win", "tab"])
+        assert(c.allKeys == ["app", "app|win", "app|win|tab"], "every level's key: \(c.allKeys)")
+    }
+
+    static func newNotesRememberTheApp() {
+        assert(NotePreferences.newNoteLevel(pinLevels: [0, 1], finest: 1, appWide: false) == 1, "the window by default")
+        assert(NotePreferences.newNoteLevel(pinLevels: [0, 1], finest: 1, appWide: true) == 0, "the app once chosen there")
+        assert(NotePreferences.newNoteLevel(pinLevels: [1], finest: 1, appWide: true) == 1, "never a level not offered")
+
+        let suite = "selftest." + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let prefs = NotePreferences(defaults: defaults)
+        assert(!prefs.pinsAppWide("a"), "no app pins app-wide until told")
+        prefs.setPinsAppWide("a", true)
+        prefs.setPinsAppWide("b", true)
+        assert(prefs.pinsAppWide("a") && prefs.pinsAppWide("b"), "each app remembers its own")
+        prefs.setPinsAppWide("a", false)
+        assert(!prefs.pinsAppWide("a") && prefs.pinsAppWide("b"), "and forgets only its own")
+    }
+
+    static func dashboardGroups() {
+        func n(_ key: String, _ text: String) -> StoredNote { StoredNote(key: key, note: Note(text: text, dx: 0, dy: 0)) }
+        // Sorted by key, "com.foo.bar" lands between two places of "com.foo".
+        let stored = [n("com.foo", "1"), n("com.foo.bar|x", "2"), n("com.foo|a", "3"), n("com.foo|a", "4")]
+        let groups = NoteGrid.groups(stored)
+        assert(groups.map(\.app) == ["com.foo", "com.foo.bar"], "one group per app, in first-seen order")
+        assert(groups[0].places.map(\.key) == ["com.foo", "com.foo|a"], "an app's places stay together")
+        assert(groups[0].places[1].notes.map(\.note.text) == ["3", "4"], "and a place's notes keep their order")
+    }
+
+    static func dashboardSearch() {
+        let text = "Ship the Café menu  Slack — design"
+        assert(NoteGrid.matches("", text), "an empty search matches everything")
+        assert(NoteGrid.matches("cafe slack", text), "every word, any order, case and accents ignored")
+        assert(!NoteGrid.matches("cafe teams", text), "a word that isn't there misses")
+    }
+
 }

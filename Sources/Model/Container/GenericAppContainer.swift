@@ -13,13 +13,8 @@ class GenericAppContainer: Container {
     private let window: Int?
 
     init?(app: NSRunningApplication) {
-        // An empty AXDocument (Electron reports one) must fall through to the title, not end
-        // the lookup there.
         let win = AXWindows.focusedWindow(pid: app.processIdentifier)
-        let id = win.flatMap { w in
-            [kAXDocumentAttribute, kAXTitleAttribute].lazy
-                .compactMap { AXWindows.string(w, $0) }.first { !$0.isEmpty }
-        }
+        let id = win.flatMap(AXWindows.identity(of:))
         // No window identity at all: a plain app can still take an app-level note, as long
         // as it has a window on screen to pin it to. Subclasses key on the window, so they can't.
         // Only with the Accessibility grant, though: without it *every* app has no identity, and

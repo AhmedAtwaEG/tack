@@ -17,6 +17,11 @@ final class NoteCard: NSObject {
     /// The first line, shown in place of the text while the note is folded to its title bar.
     private let title = PassthroughLabel(labelWithString: "")
     private(set) var isCollapsed = false
+    /// Where the note is pinned, in the strip's left corner — "Slack", "#design", "Projects" — so
+    /// a note never quietly belongs to less than you think. A click opens the pin picker.
+    private let place = NSButton(title: "", target: nil, action: nil)
+    private var hasPlace = false
+    private var underDashboard = false
 
     /// The text, colour or face changed and is worth persisting.
     var onEdit: () -> Void = {}
@@ -89,7 +94,20 @@ final class NoteCard: NSObject {
 
         pill = NotePill(cardWidth: w, cardHeight: h, styler: styler)
         view.addSubview(pill.view)
+        view.addSubview(pill.caption)
         view.topBand = Self.strip
+
+        place.isBordered = false
+        place.imagePosition = .imageLeading
+        place.imageHugsTitle = true
+        place.font = .systemFont(ofSize: 10, weight: .medium)
+        place.contentTintColor = NSColor.black.withAlphaComponent(0.5)
+        (place.cell as? NSButtonCell)?.lineBreakMode = .byTruncatingTail
+        place.alignment = .left
+        place.isHidden = true
+        place.frame = NSRect(x: 7, y: h - 16, width: 0, height: 14)
+        place.autoresizingMask = [.minYMargin]
+        view.addSubview(place, positioned: .below, relativeTo: pill.view)
 
         super.init()
         view.onPress = { [weak self] in self?.pressed() }
@@ -98,6 +116,48 @@ final class NoteCard: NSObject {
         pill.onFont = { [weak self] face, commit in self?.choose(family: face, commit: commit) }
         pill.onColor = { [weak self] color, commit in self?.choose(color: color, commit: commit) }
         pill.onDelete = { [weak self] in self?.deleteTapped() }
+        place.target = self
+        place.action = #selector(placeClicked)
+    }
+
+    // MARK: - Where it is pinned
+
+    /// Show where the note is pinned: `name` with the level's symbol. nil: say nothing — a card
+    /// in the dashboard sits under a heading that already does.
+    func setPlace(_ name: String?, symbol: String?) {
+        hasPlace = name != nil
+        place.title = name ?? ""
+        place.image = symbol.flatMap {
+            NSImage(systemSymbolName: $0, accessibilityDescription: nil)?
+                .withSymbolConfiguration(.init(pointSize: 9, weight: .semibold))
+        }
+        place.toolTip = name.map { "Pinned to \($0) — click to change" }
+        // Only as wide as its words, so the rest of the strip still drags the note; never into
+        // the pill's corner.
+        place.sizeToFit()
+        let room = view.bounds.width - 7 - NotePill.pillClosedSize.width - NotePill.pillInset * 2 - 4
+        place.frame.size = NSSize(width: max(0, min(place.frame.width, room)), height: 14)
+        updatePlaceVisibility()
+    }
+
+    /// Draw the eye to the place label — a new note says where it landed.
+    func pulsePlace() {
+        guard !place.isHidden else { return }
+        place.wantsLayer = true
+        let blink = CAKeyframeAnimation(keyPath: "opacity")
+        blink.values = [1, 0.15, 1, 0.15, 1]
+        blink.duration = 1.4
+        place.layer?.add(blink, forKey: "pulse")
+        place.contentTintColor = NSColor.black.withAlphaComponent(0.85)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { [weak self] in
+            self?.place.contentTintColor = NSColor.black.withAlphaComponent(0.5)
+        }
+    }
+
+    @objc private func placeClicked() { pill.openPinPicker() }
+
+    private func updatePlaceVisibility() {
+        place.isHidden = !hasPlace || isCollapsed || underDashboard
     }
 
     /// A click landed on the card, text or glass — the dashboard takes it as "this one".
@@ -128,6 +188,7 @@ final class NoteCard: NSObject {
         isCollapsed = collapsed
         editor.view.isHidden = collapsed
         title.isHidden = !collapsed
+        updatePlaceVisibility()
         view.topBand = collapsed ? .greatestFiniteMagnitude : Self.strip  // the whole bar is the top
         let b = view.bounds
         if collapsed {
@@ -152,6 +213,8 @@ final class NoteCard: NSObject {
     func setUnderDashboard(_ under: Bool) {
         editor.view.isHidden = under || isCollapsed
         title.isHidden = under || !isCollapsed
+        underDashboard = under
+        updatePlaceVisibility()
     }
 
     /// The card's three fields written over `base`. Where the note sits and how big it is belongs
@@ -182,6 +245,7 @@ final class NoteCard: NSObject {
             ctx.duration = duration * 0.6  // the words go first; the colour carries the rest
             editor.view.animator().alphaValue = 0
             pill.view.animator().alphaValue = 0
+            place.animator().alphaValue = 0
         }
     }
 
@@ -191,6 +255,7 @@ final class NoteCard: NSObject {
         pill.reset()
         editor.view.alphaValue = 0
         pill.view.alphaValue = 0
+        place.alphaValue = 0
         styler.showSolid(color)
         styler.fadeBack(duration: duration)
         NSAnimationContext.runAnimationGroup { ctx in
@@ -201,6 +266,7 @@ final class NoteCard: NSObject {
                 ctx.duration = duration * 0.6
                 self?.editor.view.animator().alphaValue = 1
                 self?.pill.view.animator().alphaValue = 1
+                self?.place.animator().alphaValue = 1
             }
         }
     }
@@ -208,6 +274,7 @@ final class NoteCard: NSObject {
     func restorePane() {
         editor.view.alphaValue = 1
         pill.view.alphaValue = 1
+        place.alphaValue = 1
         styler.restoreColor()
     }
 

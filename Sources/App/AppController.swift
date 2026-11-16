@@ -39,7 +39,7 @@ final class ShownPlace {
 
 /// Owns the app's lifecycle and the two loops that decide which notes are on screen
 /// and where. Menu construction lives in AppMenus.swift.
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Every floating note window built so far. Reused rather than thrown away, so flipping
     /// between surfaces doesn't build and tear down windows on every poll.
     private var pool: [NoteWindow] = []
@@ -54,10 +54,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pollWhenSettled = false  // a poll is already waiting for the screen to settle — see pollTarget
 
     /// The focused surface, as of the last poll.
-    var current: Container?
+    var current: Container? {
+        didSet { if current?.focusKey != oldValue?.focusKey { refreshElsewhere() } }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = makeStatusItem()
+        statusItem?.menu?.delegate = self
         installEditMenu()
         AXWindows.promptForPermission()  // needed to bind notes to non-Finder app windows
         AXWindows.limitWaiting()
@@ -315,7 +318,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let choices = container.pinLevels.map {
             (
                 level: $0, label: LevelName.label(level: $0, of: container.path.count),
-                symbol: LevelName.symbol(level: $0, of: container.path.count)
+                symbol: LevelName.symbol(level: $0, of: container.path.count),
+                place: Container.placeName(for: container.key(at: $0))
             )
         }
         window.setPinLevels(choices, current: level) { [weak self, weak window, weak shown] newLevel in
@@ -330,6 +334,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             guard moved else { return false }
             box.value = newLevel  // redirect this note's later edits — same cell the save closure reads
+            // The next new note in this app starts where this one was just put.
+            if let app = container.path.first, container.pinLevels.contains(0) {
+                NotePreferences.shared.setPinsAppWide(app, newLevel == 0)
+            }
             // The dashboard knows a note by its key, and the key just changed: left alone, its
             // cell would write the note back under the old one on the next edit there.
             self.grid.reload()
@@ -364,9 +372,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let spot = Coord.cascade(
             from: Coord.center(note: size, window: f.bounds.size),
             avoiding: place.notes.map(\.window.offset), note: size, window: f.bounds.size)
-        let window = show(
-            Note.new(dx: spot.dx, dy: spot.dy), level: container.finestLevel, in: place, frame: f)  // finest available, promote later
+        let level = NotePreferences.newNoteLevel(
+            pinLevels: container.pinLevels, finest: container.finestLevel,
+            appWide: container.path.first.map(NotePreferences.shared.pinsAppWide) ?? false)
+        let window = show(Note.new(dx: spot.dx, dy: spot.dy), level: level, in: place, frame: f)
         startTracking()
+        window.pulsePlace()
         return window
     }
 
@@ -462,6 +473,73 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if dashboardNote != nil { grid.update(key: key, note: note) }
     }
 
+    // MARK: - Notes elsewhere in this app
+
+    /// The focused app's other places that hold notes — other chats, tabs, folders — and how many
+    /// each holds. The menu bar shows the total next to its icon, and its menu lists them.
+    private var elsewhere: (app: String, places: [(key: String, count: Int)])?
+
+    /// Read again on every change of focus, and whenever the menu opens. Finder notes are
+    /// counted per folder, not per note: counting them would read every folder's file.
+    private func refreshElsewhere() {
+        defer { showElsewhereCount() }
+        guard let container = current, let app = container.path.first else { return elsewhere = nil }
+        var counts: [String: Int] = [:]
+        if app == FinderContainer.bundleID {
+            for folder in NotePreferences.shared.knownFolders { counts[NoteStore.key(forFolder: folder)] = 1 }
+        } else {
+            counts = (try? AppNotes.all())?.mapValues(\.count) ?? [:]
+        }
+        elsewhere = (app, Container.elsewhere(in: counts, bundleID: app, shown: container.allKeys))
+    }
+
+    private func showElsewhereCount() {
+        guard let button = statusItem?.button else { return }
+        let total = elsewhere?.places.reduce(0) { $0 + $1.count } ?? 0
+        button.title = total > 0 ? "\(total)" : ""
+        button.imagePosition = total > 0 ? .imageLeading : .imageOnly
+        button.toolTip = total > 0 ? "\(total) more note\(total == 1 ? "" : "s") elsewhere in this app" : nil
+    }
+
+    private static let elsewhereTag = 7701
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        refreshElsewhere()
+        menu.items.filter { $0.tag == Self.elsewhereTag }.forEach(menu.removeItem)
+        guard let elsewhere, !elsewhere.places.isEmpty else { return }
+        let finder = elsewhere.app == FinderContainer.bundleID
+        var items: [NSMenuItem] = [.separator()]
+        let header = NSMenuItem(
+            title: "Elsewhere in \(Container.appName(bundleID: elsewhere.app))", action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        items.append(header)
+        for place in elsewhere.places.prefix(15) {
+            var name = Container.placeName(for: place.key)
+            if name.count > 48 { name = String(name.prefix(47)) + "…" }
+            let item = NSMenuItem(
+                title: finder || place.count == 1 ? name : "\(name) (\(place.count))",
+                action: #selector(goElsewhere(_:)), keyEquivalent: "")
+            item.representedObject = place.key
+            item.target = self
+            item.indentationLevel = 1
+            items.append(item)
+        }
+        if elsewhere.places.count > 15 {
+            let more = NSMenuItem(title: "More in Open Tack…", action: nil, keyEquivalent: "")
+            more.isEnabled = false
+            items.append(more)
+        }
+        for (i, item) in items.enumerated() {
+            item.tag = Self.elsewhereTag
+            menu.insertItem(item, at: 1 + i)  // right under "Add note here"
+        }
+    }
+
+    @objc private func goElsewhere(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String else { return }
+        Container.reveal(key: key)
+    }
+
     // MARK: - Dashboard
 
     /// Every note at once. Built the first time the dashboard opens.
@@ -524,6 +602,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func closeDashboard() {
         guard let host = dashboardNote else { return }
+        refreshElsewhere()  // notes may have been deleted there
         grid.flush()
         UserDefaults.standard.set(NSStringFromRect(host.frame), forKey: Self.dashboardFrameKey)
         dashboardNote = nil

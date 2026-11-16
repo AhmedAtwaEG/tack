@@ -23,6 +23,8 @@ class HoverButton: NSButton {
 /// the bounds for free, which matters because those bounds are exactly what hovering changes.
 final class HoverPill: NSVisualEffectView {
     var onHover: ((Bool) -> Void)?
+    /// The cursor moved inside the pill, in the pill's own coordinates.
+    var onMove: ((NSPoint) -> Void)?
 
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: .arrow)
@@ -33,10 +35,11 @@ final class HoverPill: NSVisualEffectView {
         trackingAreas.forEach(removeTrackingArea)
         addTrackingArea(
             NSTrackingArea(
-                rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                rect: .zero, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
                 owner: self))
     }
 
+    override func mouseMoved(with event: NSEvent) { onMove?(convert(event.locationInWindow, from: nil)) }
     override func mouseEntered(with event: NSEvent) { onHover?(true) }
     override func mouseExited(with event: NSEvent) { onHover?(false) }
 }
